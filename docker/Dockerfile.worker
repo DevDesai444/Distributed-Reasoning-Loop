@@ -26,4 +26,4 @@ ENV RAY_ADDRESS=auto
 ENV RAY_DASHBOARD_HOST=0.0.0.0
 
 # Default: start Ray worker
-CMD ["ray", "start", "--block", "--address=$RAY_ADDRESS"]
+CMD ["/bin/sh", "-lc", "ray start --block --address=${RAY_ADDRESS:-auto}"]

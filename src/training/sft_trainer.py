@@ -9,6 +9,11 @@ from typing import List, Optional, Dict, Any
 from pathlib import Path
 import torch
 
+from .runtime_utils import (
+    build_causal_lm_load_kwargs,
+    get_runtime_dtype,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,6 +68,7 @@ class ReasoningSFTTrainer:
         self.model = None
         self.tokenizer = None
         self.trainer = None
+        self.use_kbit_training = False
     
     def setup(self):
         """Setup model and tokenizer."""
@@ -77,15 +83,10 @@ class ReasoningSFTTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
         # Load model
-        model_kwargs = {
-            "trust_remote_code": True,
-            "torch_dtype": torch.bfloat16 if self.config.bf16 else torch.float16,
-        }
-        
-        if self.config.use_lora:
-            model_kwargs["load_in_8bit"] = True
-        else:
-            model_kwargs["device_map"] = "auto"
+        model_kwargs, self.use_kbit_training = build_causal_lm_load_kwargs(
+            prefer_bf16=self.config.bf16,
+            allow_8bit=self.config.use_lora,
+        )
         
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
@@ -104,8 +105,9 @@ class ReasoningSFTTrainer:
         """Apply LoRA adapters."""
         try:
             from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-            
-            self.model = prepare_model_for_kbit_training(self.model)
+
+            if self.use_kbit_training:
+                self.model = prepare_model_for_kbit_training(self.model)
             
             lora_config = LoraConfig(
                 r=self.config.lora_r,
@@ -158,22 +160,18 @@ class ReasoningSFTTrainer:
             from datasets import Dataset as HFDataset
             
             self.setup()
-            
-            # Format data
-            def format_func(examples):
-                return {
-                    "text": [
-                        self.format_example({"prompt": p, "response": r})
-                        for p, r in zip(examples["prompt"], examples["response"])
-                    ]
-                }
-            
-            # Convert to list of dicts with consistent keys
+
+            # Pre-format the dataset so TRL always receives a concrete text field.
             formatted_train = []
             for item in train_data:
                 formatted_train.append({
-                    "prompt": item.get("prompt", item.get("problem", "")),
-                    "completion": item.get("response", item.get("reasoning", "")),
+                    "text": self.format_example({
+                        "prompt": item.get("prompt", item.get("problem", "")),
+                        "response": item.get(
+                            "response",
+                            item.get("completion", item.get("reasoning", "")),
+                        ),
+                    })
                 })
             
             train_dataset = HFDataset.from_list(formatted_train)
@@ -183,8 +181,13 @@ class ReasoningSFTTrainer:
                 formatted_eval = []
                 for item in eval_data:
                     formatted_eval.append({
-                        "prompt": item.get("prompt", item.get("problem", "")),
-                        "completion": item.get("response", item.get("reasoning", "")),
+                        "text": self.format_example({
+                            "prompt": item.get("prompt", item.get("problem", "")),
+                            "response": item.get(
+                                "response",
+                                item.get("completion", item.get("reasoning", "")),
+                            ),
+                        })
                     })
                 eval_dataset = HFDataset.from_list(formatted_eval)
             
@@ -203,10 +206,11 @@ class ReasoningSFTTrainer:
                 eval_steps=self.config.eval_steps if eval_data else None,
                 save_steps=self.config.save_steps,
                 eval_strategy="steps" if eval_data else "no",
-                fp16=False,
-                bf16=True,
+                fp16=self.config.fp16 and torch.cuda.is_available(),
+                bf16=self.config.bf16 and torch.cuda.is_available(),
                 max_length=self.config.max_length,
                 packing=self.config.packing,
+                dataset_text_field="text",
             )
             
             # Create trainer
@@ -254,15 +258,15 @@ class ReasoningSFTTrainer:
             
             base_model = AutoModelForCausalLM.from_pretrained(
                 self.config.model_name,
-                torch_dtype=torch.float16,
-                device_map="auto",
+                torch_dtype=get_runtime_dtype(prefer_bf16=False),
+                device_map="auto" if torch.cuda.is_available() else None,
             )
             self.model = PeftModel.from_pretrained(base_model, path)
         else:
             self.model = AutoModelForCausalLM.from_pretrained(
                 path,
-                torch_dtype=torch.float16,
-                device_map="auto",
+                torch_dtype=get_runtime_dtype(prefer_bf16=False),
+                device_map="auto" if torch.cuda.is_available() else None,
             )
 
 
@@ -295,7 +299,7 @@ class SFTFromSyntheticData:
                     if item.get("is_correct", True):
                         data.append({
                             "prompt": item.get("problem", item.get("prompt", "")),
-                            "completion": item.get("reasoning", item.get("response", "")),
+                            "response": item.get("reasoning", item.get("response", "")),
                         })
         elif data_file.suffix == ".json":
             with open(data_file) as f:
@@ -304,7 +308,7 @@ class SFTFromSyntheticData:
                     if item.get("is_correct", True):
                         data.append({
                             "prompt": item.get("problem", item.get("prompt", "")),
-                            "completion": item.get("reasoning", item.get("response", "")),
+                            "response": item.get("reasoning", item.get("response", "")),
                         })
         
         logger.info(f"Loaded {len(data)} correct reasoning paths")

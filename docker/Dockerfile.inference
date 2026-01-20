@@ -37,4 +37,4 @@ RUN pip install -e .
 EXPOSE 8000
 
 # Default: start vLLM API server
-CMD ["python", "-m", "vllm.entrypoints.openai.api_server", "--model", "${MODEL_NAME}", "--tensor-parallel-size", "1"]
+CMD ["/bin/sh", "-lc", "python -m vllm.entrypoints.openai.api_server --model ${MODEL_NAME:-Qwen/Qwen2.5-7B-Instruct} --tensor-parallel-size 1"]

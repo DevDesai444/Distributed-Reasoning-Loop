@@ -13,6 +13,11 @@ import json
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+from .runtime_utils import (
+    build_causal_lm_load_kwargs,
+    get_runtime_dtype,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -145,6 +150,7 @@ class ReasoningDPOTrainer:
         self.ref_model = None
         self.tokenizer = None
         self.trainer = None
+        self.use_kbit_training = False
         
     def setup(self):
         """Setup model, tokenizer, and trainer."""
@@ -159,16 +165,10 @@ class ReasoningDPOTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
         # Load model
-        model_kwargs = {
-            "trust_remote_code": True,
-            "torch_dtype": torch.bfloat16 if self.config.bf16 else torch.float16,
-        }
-        
-        if self.config.use_lora:
-            # Load in 8-bit for LoRA
-            model_kwargs["load_in_8bit"] = True
-        else:
-            model_kwargs["device_map"] = "auto"
+        model_kwargs, self.use_kbit_training = build_causal_lm_load_kwargs(
+            prefer_bf16=self.config.bf16,
+            allow_8bit=self.config.use_lora,
+        )
         
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
@@ -189,8 +189,9 @@ class ReasoningDPOTrainer:
         """Apply LoRA adapters to model."""
         try:
             from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-            
-            self.model = prepare_model_for_kbit_training(self.model)
+
+            if self.use_kbit_training:
+                self.model = prepare_model_for_kbit_training(self.model)
             
             lora_config = LoraConfig(
                 r=self.config.lora_r,
@@ -244,8 +245,8 @@ class ReasoningDPOTrainer:
                 eval_steps=self.config.eval_steps if eval_data else None,
                 save_steps=self.config.save_steps,
                 eval_strategy="steps" if eval_data else "no",
-                fp16=self.config.fp16,
-                bf16=self.config.bf16,
+                fp16=self.config.fp16 and torch.cuda.is_available(),
+                bf16=self.config.bf16 and torch.cuda.is_available(),
                 beta=self.config.beta,
                 loss_type=self.config.loss_type,
                 max_length=self.config.max_length,
@@ -300,15 +301,15 @@ class ReasoningDPOTrainer:
             
             base_model = AutoModelForCausalLM.from_pretrained(
                 self.config.model_name,
-                torch_dtype=torch.float16,
-                device_map="auto",
+                torch_dtype=get_runtime_dtype(prefer_bf16=False),
+                device_map="auto" if torch.cuda.is_available() else None,
             )
             self.model = PeftModel.from_pretrained(base_model, path)
         else:
             self.model = AutoModelForCausalLM.from_pretrained(
                 path,
-                torch_dtype=torch.float16,
-                device_map="auto",
+                torch_dtype=get_runtime_dtype(prefer_bf16=False),
+                device_map="auto" if torch.cuda.is_available() else None,
             )
 
 

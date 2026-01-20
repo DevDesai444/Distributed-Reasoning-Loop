@@ -142,7 +142,7 @@ def run_grpo_training(config, data_path, base_model=None):
 
 def run_evaluation(config, model_path, args):
     """Run evaluation phase."""
-    from evaluation import GSM8KEvaluator, HumanEvalEvaluator
+    from evaluation import GSM8KEvaluator, HumanEvalEvaluator, MATHEvaluator
     
     logger.info("=" * 50)
     logger.info("Phase 3: Evaluation")
@@ -150,7 +150,7 @@ def run_evaluation(config, model_path, args):
     
     results = {}
     
-    if args.dataset in ["gsm8k", "math"]:
+    if args.dataset == "gsm8k":
         evaluator = GSM8KEvaluator(
             model_name=model_path,
             use_test_time_compute=args.use_ttc,
@@ -159,6 +159,16 @@ def run_evaluation(config, model_path, args):
         result = evaluator.evaluate(subset_size=args.eval_subset_size)
         results["gsm8k"] = result
         logger.info(f"GSM8K Accuracy: {result.accuracy:.2%}")
+
+    if args.dataset == "math":
+        evaluator = MATHEvaluator(
+            model_name=model_path,
+            use_test_time_compute=args.use_ttc,
+            ttc_samples=config.training.evaluation.num_paths,
+        )
+        result = evaluator.evaluate(subset_size=args.eval_subset_size)
+        results["math"] = result
+        logger.info(f"MATH Accuracy: {result.accuracy:.2%}")
     
     if args.dataset in ["humaneval", "mbpp"]:
         evaluator = HumanEvalEvaluator(model_name=model_path)

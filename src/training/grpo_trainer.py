@@ -15,6 +15,11 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 import json
 
+from .runtime_utils import (
+    build_causal_lm_load_kwargs,
+    get_runtime_device,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -147,6 +152,8 @@ class ReasoningGRPOTrainer:
         self.ref_model = None
         self.tokenizer = None
         self.optimizer = None
+        self.device = get_runtime_device()
+        self.use_kbit_training = False
     
     def setup(self):
         """Setup model, tokenizer, and optimizer."""
@@ -163,16 +170,17 @@ class ReasoningGRPOTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
         # Load model
-        model_kwargs = {
-            "trust_remote_code": True,
-            "torch_dtype": torch.bfloat16 if self.config.bf16 else torch.float16,
-        }
-        
+        model_kwargs, self.use_kbit_training = build_causal_lm_load_kwargs(
+            prefer_bf16=self.config.bf16,
+            allow_8bit=self.config.use_lora,
+        )
+
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
             **model_kwargs,
         )
-        self.model.to("cuda")
+        if not torch.cuda.is_available():
+            self.model.to(self.device)
         
         # Apply LoRA if configured
         if self.config.use_lora:
@@ -183,13 +191,16 @@ class ReasoningGRPOTrainer:
                 param.requires_grad = True
         
         # Create reference model (frozen copy for KL) - load in 8-bit to save memory
+        ref_model_kwargs, _ = build_causal_lm_load_kwargs(
+            prefer_bf16=True,
+            allow_8bit=True,
+        )
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
-            trust_remote_code=True,
-            torch_dtype=torch.bfloat16,
-            load_in_8bit=True,
-            device_map="auto",
+            **ref_model_kwargs,
         )
+        if not torch.cuda.is_available():
+            self.ref_model.to(self.device)
         self.ref_model.eval()
         
         # Setup optimizer - only optimize trainable params
@@ -205,8 +216,8 @@ class ReasoningGRPOTrainer:
     
     def _apply_lora(self):
         """Apply LoRA adapters."""
-        from peft import LoraConfig, get_peft_model
-        
+        from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+
         lora_config = LoraConfig(
             r=self.config.lora_r,
             lora_alpha=self.config.lora_alpha,
@@ -215,7 +226,9 @@ class ReasoningGRPOTrainer:
             bias="none",
             task_type="CAUSAL_LM",
         )
-        
+
+        if self.use_kbit_training:
+            self.model = prepare_model_for_kbit_training(self.model)
         self.model = get_peft_model(self.model, lora_config)
         self.model.train()
         self.model.print_trainable_parameters()

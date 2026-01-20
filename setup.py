@@ -17,6 +17,7 @@ setup(
         # RL Training
         "trl>=0.7.0",
         "peft>=0.7.0",
+        "bitsandbytes>=0.43.0; platform_system == 'Linux'",
         
         # Data Processing
         "datasets>=2.16.0",
@@ -45,6 +46,7 @@ setup(
         "training": [
             "deepspeed>=0.12.0",
             "wandb>=0.16.0",
+            "bitsandbytes>=0.43.0; platform_system == 'Linux'",
         ],
         "dev": [
             "pytest>=7.4.0",
@@ -60,6 +62,7 @@ setup(
             "confluent-kafka>=2.3.0",
             "deepspeed>=0.12.0",
             "wandb>=0.16.0",
+            "bitsandbytes>=0.43.0; platform_system == 'Linux'",
             "pytest>=7.4.0",
             "pytest-asyncio>=0.21.0",
         ],

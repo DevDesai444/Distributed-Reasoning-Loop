@@ -12,8 +12,6 @@ import time
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
-from tabulate import tabulate
-import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -22,6 +20,12 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def get_torch():
+    """Import torch lazily so CLI help does not require the full ML stack."""
+    import torch
+    return torch
 
 
 @dataclass
@@ -119,7 +123,7 @@ class TrainingMethodComparison:
         
         self.reward_model = RewardModel(config)
         self.reward_model.setup()
-        
+        torch = get_torch()
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.reward_model.to(device)
         
@@ -241,7 +245,7 @@ class TrainingMethodComparison:
         tokenizer = None
         if not use_sglang_for_this:
             from transformers import AutoModelForCausalLM, AutoTokenizer
-            
+            torch = get_torch()
             tokenizer = AutoTokenizer.from_pretrained(load_path, trust_remote_code=True)
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
@@ -255,6 +259,7 @@ class TrainingMethodComparison:
             model.eval()
         
         metrics = MethodMetrics(method_name=method_name)
+        torch = get_torch()
         
         generated_rewards = []  # Rewards for model-generated responses
         response_lengths = []
@@ -556,6 +561,8 @@ class TrainingMethodComparison:
     
     def _print_comparison_table(self):
         """Print a formatted comparison table."""
+        from tabulate import tabulate
+
         print("\n" + "╔" + "═"*70 + "╗")
         print("║" + " COMPARISON RESULTS ".center(70) + "║")
         print("╚" + "═"*70 + "╝\n")
@@ -711,6 +718,7 @@ def load_standard_dataset(
         logger.info("Generating real rejected responses using model...")
         
         from transformers import AutoModelForCausalLM, AutoTokenizer
+        torch = get_torch()
         
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         if tokenizer.pad_token is None:

@@ -6,19 +6,10 @@ Supports GSM8K, HumanEval, and MATH benchmarks.
 
 import argparse
 import logging
-import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
-from evaluation import (
-    GSM8KEvaluator,
-    HumanEvalEvaluator,
-    MATHEvaluator,
-    run_all_benchmarks,
-)
-from omegaconf import OmegaConf
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,6 +64,13 @@ def main():
     )
     
     args = parser.parse_args()
+
+    from evaluation import (
+        GSM8KEvaluator,
+        HumanEvalEvaluator,
+        MATHEvaluator,
+        run_all_benchmarks,
+    )
     
     # Create output directory
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)

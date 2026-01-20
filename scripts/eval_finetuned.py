@@ -21,7 +21,6 @@ import re
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass, asdict
-import torch
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -31,6 +30,12 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def get_torch():
+    """Import torch lazily so CLI help does not require the full ML stack."""
+    import torch
+    return torch
 
 
 @dataclass
@@ -72,6 +77,7 @@ class ModelEvaluator:
     def load(self):
         """Load model and tokenizer."""
         from transformers import AutoModelForCausalLM, AutoTokenizer
+        torch = get_torch()
         
         logger.info(f"Loading model: {self.model_path}")
         
@@ -121,6 +127,7 @@ class ModelEvaluator:
         ).to(self.device)
         
         responses = []
+        torch = get_torch()
         with torch.no_grad():
             # Process in sub-batches to manage VRAM
             for i in range(0, n_samples, self.batch_size):
@@ -260,6 +267,7 @@ def compare_models(
     output_path: str = "./comparison_results.json",
 ) -> ComparisonResults:
     """Compare base and fine-tuned models."""
+    torch = get_torch()
     problems = load_held_out_problems(num_problems)
     
     # Base

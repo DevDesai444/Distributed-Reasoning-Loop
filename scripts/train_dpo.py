@@ -12,7 +12,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from training import DPOTrainerConfig, ReasoningDPOTrainer, RejectionSamplingDPO
 from omegaconf import OmegaConf
 
 logging.basicConfig(
@@ -35,6 +34,18 @@ def load_dpo_data(data_path: str):
     
     logger.info(f"Loaded {len(data)} DPO pairs from {data_path}")
     return data
+
+
+def load_jsonl_records(data_path: str):
+    """Load raw JSONL records from file."""
+    records = []
+    with open(data_path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    logger.info(f"Loaded {len(records)} raw records from {data_path}")
+    return records
 
 
 def main():
@@ -111,6 +122,8 @@ def main():
     )
     
     args = parser.parse_args()
+
+    from training import DPOTrainerConfig, ReasoningDPOTrainer, RejectionSamplingDPO
     
     # Load config
     if Path(args.config).exists():
@@ -134,10 +147,6 @@ def main():
         use_lora=args.use_lora and not args.no_lora,
     )
     
-    # Load data
-    train_data = load_dpo_data(args.data_path)
-    eval_data = load_dpo_data(args.eval_data_path) if args.eval_data_path else None
-    
     logger.info(f"Training configuration:")
     logger.info(f"  Model: {model_name}")
     logger.info(f"  Beta: {args.beta}")
@@ -149,10 +158,42 @@ def main():
     
     # Train
     if args.rejection_sampling:
+        train_data = load_jsonl_records(args.data_path)
+        eval_data = load_jsonl_records(args.eval_data_path) if args.eval_data_path else None
+
+        normalized_train = [
+            {
+                "id": item.get("id", item.get("problem_id", "")),
+                "problem": item.get("problem", item.get("prompt", "")),
+                "answer": item.get("answer", item.get("expected_answer", "")),
+                "function_call": item.get("function_call", ""),
+            }
+            for item in train_data
+        ]
+        normalized_eval = None
+        if eval_data:
+            normalized_eval = [
+                {
+                    "id": item.get("id", item.get("problem_id", "")),
+                    "problem": item.get("problem", item.get("prompt", "")),
+                    "answer": item.get("answer", item.get("expected_answer", "")),
+                    "function_call": item.get("function_call", ""),
+                }
+                for item in eval_data
+            ]
+
+        if not normalized_train or any(
+            not item["problem"] or not item["answer"] for item in normalized_train
+        ):
+            raise ValueError(
+                "Rejection sampling mode requires raw problem records with both problem/prompt and answer fields."
+            )
+
         trainer = RejectionSamplingDPO(dpo_config)
-        # For rejection sampling, we need problems not pairs
-        logger.warning("Rejection sampling mode - data should contain problems")
+        trainer.train(normalized_train, normalized_eval)
     else:
+        train_data = load_dpo_data(args.data_path)
+        eval_data = load_dpo_data(args.eval_data_path) if args.eval_data_path else None
         trainer = ReasoningDPOTrainer(dpo_config)
         trainer.train(train_data, eval_data)
     
