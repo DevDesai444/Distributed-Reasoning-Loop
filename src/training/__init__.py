@@ -17,7 +17,11 @@ from .grpo_trainer import (
 from .reward_model import (
     RewardModel,
     RewardModelConfig,
+)
+
+from .process_reward_model import (
     ProcessRewardModel,
+    ProcessRewardModelConfig,
 )
 
 from .sft_trainer import (
@@ -38,6 +42,7 @@ __all__ = [
     "RewardModel",
     "RewardModelConfig",
     "ProcessRewardModel",
+    "ProcessRewardModelConfig",
     # SFT
     "SFTTrainerConfig",
     "ReasoningSFTTrainer",
