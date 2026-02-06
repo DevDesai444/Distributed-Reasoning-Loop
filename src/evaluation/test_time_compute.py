@@ -39,7 +39,9 @@ class TestTimeComputeConfig:
     # Scoring
     use_reward_model: bool = True
     reward_model_path: Optional[str] = None
+    process_reward_model_path: Optional[str] = None
     use_verifier: bool = True
+    reranker_type: str = "score"  # score, orm, prm
     
     # Aggregation
     aggregation_method: str = "best"  # best, majority_vote, weighted_vote
@@ -67,6 +69,7 @@ class TestTimeCompute:
         
         self.generator = None
         self.reward_model = None
+        self.process_reward_model = None
         self.verifier = None
     
     def setup(self):
@@ -91,9 +94,18 @@ class TestTimeCompute:
                 from training import RewardModel, RewardModelConfig
             except ImportError:
                 from ..training import RewardModel, RewardModelConfig
-            rm_config = RewardModelConfig(model_name=self.model_name)
+            rm_config = RewardModelConfig()
             self.reward_model = RewardModel(rm_config)
             self.reward_model.load(self.config.reward_model_path)
+
+        if self.config.process_reward_model_path:
+            try:
+                from training import ProcessRewardModel, ProcessRewardModelConfig
+            except ImportError:
+                from ..training import ProcessRewardModel, ProcessRewardModelConfig
+            prm_config = ProcessRewardModelConfig()
+            self.process_reward_model = ProcessRewardModel(prm_config)
+            self.process_reward_model.load(self.config.process_reward_model_path)
         
         if self.config.use_verifier:
             if self.verifier_type == "math":
@@ -175,6 +187,39 @@ class TestTimeCompute:
             path.score = score
         
         return paths
+
+    def rerank_with_reward_model(
+        self,
+        problem: str,
+        paths: List[GeneratedPath],
+    ) -> List[GeneratedPath]:
+        """Rerank candidates with the outcome reward model."""
+        if self.reward_model is None:
+            return paths
+
+        for path in paths:
+            orm_score = self.reward_model.compute_reward(problem, path.reasoning)
+            path.score = orm_score
+            path.metadata["outcome_reward_score"] = orm_score
+
+        return sorted(paths, key=lambda candidate: candidate.score, reverse=True)
+
+    def rerank_with_process_reward_model(
+        self,
+        problem: str,
+        paths: List[GeneratedPath],
+    ) -> List[GeneratedPath]:
+        """Rerank candidates by mean step reward from the PRM."""
+        if self.process_reward_model is None:
+            return paths
+
+        ranked = self.process_reward_model.rerank_candidates(problem, paths)
+        reranked_paths: List[GeneratedPath] = []
+        for candidate, prm_score in ranked:
+            candidate.score = prm_score
+            candidate.metadata["process_reward_score"] = prm_score
+            reranked_paths.append(candidate)
+        return reranked_paths
     
     def select_best(
         self,
@@ -239,6 +284,13 @@ class TestTimeCompute:
         """
         paths = self.generate_paths(problem)
         paths = self.score_paths(problem, paths, expected_answer)
+
+        reranker_type = self.config.reranker_type
+        if reranker_type == "prm" and self.process_reward_model is not None:
+            paths = self.rerank_with_process_reward_model(problem, paths)
+        elif reranker_type == "orm" and self.reward_model is not None:
+            paths = self.rerank_with_reward_model(problem, paths)
+
         best = self.select_best(paths)
         
         return best, paths
@@ -255,11 +307,14 @@ class BestOfNSampler:
         model_name: str,
         n: int = 16,
         reward_model_path: Optional[str] = None,
+        process_reward_model_path: Optional[str] = None,
     ):
         config = TestTimeComputeConfig(
             num_samples=n,
             use_reward_model=reward_model_path is not None,
             reward_model_path=reward_model_path,
+            process_reward_model_path=process_reward_model_path,
+            reranker_type="prm" if process_reward_model_path else ("orm" if reward_model_path else "score"),
         )
         self.ttc = TestTimeCompute(model_name, config)
     
