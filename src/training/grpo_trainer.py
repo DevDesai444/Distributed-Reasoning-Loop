@@ -1,24 +1,24 @@
 """
-Group Relative Policy Optimization (GRPO) Trainer
-Based on DeepSeek-R1 approach - no reward model needed.
-
-Key insight: Sample multiple responses per prompt, use relative ranking
-within the group to compute advantages. No separate reward model.
+Group Relative Policy Optimization (GRPO) trainer with verifier-aware logging.
 """
 
+from __future__ import annotations
+
+import json
 import logging
-from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Tuple
+import math
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-import json
+from torch.utils.data import Dataset
 
-from .runtime_utils import (
-    build_causal_lm_load_kwargs,
-    get_runtime_device,
-)
+from verifier import create_verifier, get_default_sandbox_image
+from wandb_utils import ensure_wandb_run, log_to_wandb
+
+from .runtime_utils import build_causal_lm_load_kwargs, get_runtime_device
 
 logger = logging.getLogger(__name__)
 
@@ -26,48 +26,55 @@ logger = logging.getLogger(__name__)
 @dataclass
 class GRPOConfig:
     """Configuration for GRPO training."""
-    # Model
+
     model_name: str = "Qwen/Qwen2.5-7B-Instruct"
-    
-    # GRPO specific
-    group_size: int = 2  # Number of responses per prompt to sample
-    kl_coef: float = 0.1  # KL penalty coefficient
-    clip_range: float = 0.2  # PPO-style clipping
-    
-    # Training
+
+    group_size: int = 2
+    kl_coef: float = 0.1
+    clip_range: float = 0.2
+    kl_threshold: float = 0.1
+
     learning_rate: float = 5e-5
     batch_size: int = 1
     gradient_accumulation_steps: int = 8
     num_epochs: int = 1
     warmup_ratio: float = 0.1
     max_grad_norm: float = 1.0
-    
-    # Sequence length
+
     max_length: int = 1024
     max_prompt_length: int = 256
-    
-    # LoRA
+
     use_lora: bool = True
     lora_r: int = 8
     lora_alpha: int = 16
     lora_dropout: float = 0.05
     lora_target_modules: List[str] = field(default_factory=lambda: ["q_proj", "v_proj"])
-    
-    # Logging
+
     logging_steps: int = 10
+    eval_interval_steps: int = 50
+    heldout_eval_size: int = 20
+    heldout_split: str = "test"
+    eval_max_new_tokens: int = 256
     output_dir: str = "./grpo_output"
-    
-    # Hardware
+
     bf16: bool = True
     gradient_checkpointing: bool = True
 
+    verifier_type: str = "math"
+    verifier_timeout: int = 10
+    code_docker_image: str = field(default_factory=get_default_sandbox_image)
+    code_memory_limit: str = "512m"
+
+    wandb_project: str = "distributed-reasoning-loop"
+    wandb_mode: str = "offline"
+
 
 class GRPODataset(Dataset):
-    """Dataset for GRPO training with pre-computed groups."""
-    
+    """Dataset for GRPO training with grouped prompt responses."""
+
     def __init__(
         self,
-        data: List[Dict],
+        data: List[Dict[str, Any]],
         tokenizer,
         max_length: int = 2048,
         max_prompt_length: int = 512,
@@ -75,124 +82,104 @@ class GRPODataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.max_prompt_length = max_prompt_length
-        
-        # Group data by prompt
         self.groups = self._create_groups(data)
-    
-    def _create_groups(self, data: List[Dict]) -> List[Dict]:
-        """Group responses by prompt for GRPO."""
-        prompt_to_responses = {}
-        
+
+    def _create_groups(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        prompt_to_responses: dict[str, dict[str, Any]] = {}
+
         for item in data:
-            # Handle DPO format (prompt, chosen, rejected)
             if "chosen" in item and "rejected" in item:
                 prompt = item.get("prompt", "")
-                if prompt not in prompt_to_responses:
-                    prompt_to_responses[prompt] = {
-                        "prompt": prompt,
-                        "chosen": [],
-                        "rejected": [],
-                    }
-                prompt_to_responses[prompt]["chosen"].append(item["chosen"])
-                prompt_to_responses[prompt]["rejected"].append(item["rejected"])
+                bucket = prompt_to_responses.setdefault(
+                    prompt,
+                    {"prompt": prompt, "chosen": [], "rejected": []},
+                )
+                bucket["chosen"].append(item["chosen"])
+                bucket["rejected"].append(item["rejected"])
+                continue
+
+            prompt = item.get("prompt", item.get("problem", ""))
+            bucket = prompt_to_responses.setdefault(
+                prompt,
+                {"prompt": prompt, "chosen": [], "rejected": []},
+            )
+
+            response = item.get("reasoning", item.get("response", ""))
+            if item.get("is_correct", False):
+                bucket["chosen"].append(response)
             else:
-                # Handle raw sample format (is_correct field)
-                prompt = item.get("prompt", item.get("problem", ""))
-                
-                if prompt not in prompt_to_responses:
-                    prompt_to_responses[prompt] = {
-                        "prompt": prompt,
-                        "chosen": [],
-                        "rejected": [],
-                    }
-                
-                # Add to appropriate list based on correctness
-                if item.get("is_correct", False):
-                    prompt_to_responses[prompt]["chosen"].append(
-                        item.get("reasoning", item.get("response", ""))
-                    )
-                else:
-                    prompt_to_responses[prompt]["rejected"].append(
-                        item.get("reasoning", item.get("response", ""))
-                    )
-        
-        # Convert to list and filter groups with both chosen and rejected
-        groups = []
-        for prompt, responses in prompt_to_responses.items():
-            if responses["chosen"] and responses["rejected"]:
-                groups.append(responses)
-        
-        logger.info(f"Created {len(groups)} training groups from {len(prompt_to_responses)} prompts")
+                bucket["rejected"].append(response)
+
+        groups = [group for group in prompt_to_responses.values() if group["chosen"] and group["rejected"]]
+        logger.info("Created %s GRPO prompt groups", len(groups))
         return groups
-    
-    def __len__(self):
+
+    def __len__(self) -> int:
         return len(self.groups)
-    
-    def __getitem__(self, idx):
-        group = self.groups[idx]
-        return {
-            "prompt": group["prompt"],
-            "chosen": group["chosen"],
-            "rejected": group["rejected"],
-        }
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self.groups[idx]
 
 
 class ReasoningGRPOTrainer:
-    """
-    GRPO Trainer for reasoning tasks.
-    
-    Uses group-relative advantages instead of a reward model.
-    Responses within a group are ranked, and advantages are computed
-    based on relative position.
-    """
-    
+    """Custom GRPO trainer with offline verifier-backed evaluation."""
+
     def __init__(self, config: GRPOConfig):
         self.config = config
         self.model = None
         self.ref_model = None
         self.tokenizer = None
         self.optimizer = None
+        self.scheduler = None
         self.device = get_runtime_device()
         self.use_kbit_training = False
-    
+        self.verifier = None
+        self._heldout_problems: Optional[List[Dict[str, str]]] = None
+
+    def _setup_verifier(self):
+        verifier_kwargs: dict[str, Any] = {}
+        if self.config.verifier_type == "code":
+            verifier_kwargs = {
+                "timeout": self.config.verifier_timeout,
+                "docker_image": self.config.code_docker_image,
+                "memory_limit": self.config.code_memory_limit,
+            }
+        self.verifier = create_verifier(self.config.verifier_type, **verifier_kwargs)
+
     def setup(self):
-        """Setup model, tokenizer, and optimizer."""
+        """Load tokenizer, policy model, reference model, and verifier."""
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        
-        logger.info(f"Loading model: {self.config.model_name}")
-        
-        # Load tokenizer
+
+        self._setup_verifier()
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.config.model_name,
             trust_remote_code=True,
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        
-        # Load model
+
         model_kwargs, self.use_kbit_training = build_causal_lm_load_kwargs(
             prefer_bf16=self.config.bf16,
             allow_8bit=self.config.use_lora,
         )
-
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
             **model_kwargs,
         )
         if not torch.cuda.is_available():
             self.model.to(self.device)
-        
-        # Apply LoRA if configured
+
         if self.config.use_lora:
             self._apply_lora()
         else:
-            # Enable gradients for all parameters if not using LoRA
             for param in self.model.parameters():
                 param.requires_grad = True
-        
-        # Create reference model (frozen copy for KL) - load in 8-bit to save memory
+
+        if self.config.gradient_checkpointing:
+            self.model.gradient_checkpointing_enable()
+
         ref_model_kwargs, _ = build_causal_lm_load_kwargs(
-            prefer_bf16=True,
+            prefer_bf16=self.config.bf16,
             allow_8bit=True,
         )
         self.ref_model = AutoModelForCausalLM.from_pretrained(
@@ -202,20 +189,12 @@ class ReasoningGRPOTrainer:
         if not torch.cuda.is_available():
             self.ref_model.to(self.device)
         self.ref_model.eval()
-        
-        # Setup optimizer - only optimize trainable params
-        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        logger.info(f"Number of trainable parameters: {sum(p.numel() for p in trainable_params)}")
-        
-        self.optimizer = torch.optim.AdamW(
-            trainable_params,
-            lr=self.config.learning_rate,
-        )
-        
-        logger.info(f"Model loaded: {self.config.model_name}")
-    
+
+        trainable_params = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
+        self.optimizer = torch.optim.AdamW(trainable_params, lr=self.config.learning_rate)
+        logger.info("Loaded GRPO trainer components for %s", self.config.model_name)
+
     def _apply_lora(self):
-        """Apply LoRA adapters."""
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
         lora_config = LoraConfig(
@@ -232,7 +211,7 @@ class ReasoningGRPOTrainer:
         self.model = get_peft_model(self.model, lora_config)
         self.model.train()
         self.model.print_trainable_parameters()
-    
+
     def compute_log_probs(
         self,
         model,
@@ -240,81 +219,66 @@ class ReasoningGRPOTrainer:
         attention_mask: torch.Tensor,
         labels: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute log probabilities for sequences."""
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
         logits = outputs.logits
-        
-        # Shift for causal LM
+
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
-        
-        # Compute log probs
         log_probs = F.log_softmax(shift_logits.float(), dim=-1)
-        
-        # Gather log probs for actual tokens
-        gathered_log_probs = torch.gather(
-            log_probs,
-            dim=-1,
-            index=shift_labels.unsqueeze(-1),
-        ).squeeze(-1)
-        
-        # Mask padding
+
+        gathered = torch.gather(log_probs, dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
         mask = (shift_labels != self.tokenizer.pad_token_id).float()
-        seq_log_probs = (gathered_log_probs * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)
-        
-        return seq_log_probs
-    
+        return (gathered * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)
+
     def compute_grpo_loss(
         self,
         prompt: str,
         chosen_responses: List[str],
         rejected_responses: List[str],
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """
-        Compute GRPO loss for a group of responses.
-        
-        1. Sample responses from both chosen and rejected
-        2. Compute advantages based on correctness (chosen=+1, rejected=-1)
-        3. Apply PPO-style clipped objective with KL penalty
-        """
+        """Compute GRPO loss and monitoring metrics for a grouped prompt."""
         device = next(self.model.parameters()).device
-        
-        # Combine responses with labels
-        all_responses = []
-        advantages = []
-        
-        # Take up to group_size/2 from each
-        n_each = self.config.group_size // 2
-        
-        for resp in chosen_responses[:n_each]:
-            all_responses.append(resp)
-            advantages.append(1.0)  # Positive advantage for correct
-        
-        for resp in rejected_responses[:n_each]:
-            all_responses.append(resp)
-            advantages.append(-1.0)  # Negative advantage for incorrect
-        
-        if not all_responses:
-            return torch.tensor(0.0, device=device, requires_grad=True), {}
-        
-        advantages = torch.tensor(advantages, device=device)
-        
-        # Normalize advantages (GRPO key insight)
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
-        # Tokenize all sequences
+        n_each = max(self.config.group_size // 2, 1)
+
+        responses: list[str] = []
+        raw_rewards: list[float] = []
+        advantages: list[float] = []
+
+        for response in chosen_responses[:n_each]:
+            responses.append(response)
+            raw_rewards.append(1.0)
+            advantages.append(1.0)
+
+        for response in rejected_responses[:n_each]:
+            responses.append(response)
+            raw_rewards.append(0.0)
+            advantages.append(-1.0)
+
+        if not responses:
+            zero = torch.tensor(0.0, device=device, requires_grad=True)
+            return zero, {
+                "policy_loss": 0.0,
+                "kl_div": 0.0,
+                "ratio_mean": 1.0,
+                "mean_reward": 0.0,
+                "reward_std": 0.0,
+            }
+
+        advantages_tensor = torch.tensor(advantages, device=device, dtype=torch.float32)
+        advantages_tensor = (advantages_tensor - advantages_tensor.mean()) / (advantages_tensor.std() + 1e-8)
+        target_tensor = torch.tensor(raw_rewards, device=device, dtype=torch.float32)
+
         sequences = [
             self.tokenizer.apply_chat_template(
-                [{"role": "user", "content": prompt}, {"role": "assistant", "content": resp}],
+                [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": response},
+                ],
                 tokenize=False,
                 add_generation_prompt=False,
             )
-            for resp in all_responses
+            for response in responses
         ]
-        
         encodings = self.tokenizer(
             sequences,
             padding=True,
@@ -322,178 +286,295 @@ class ReasoningGRPOTrainer:
             max_length=self.config.max_length,
             return_tensors="pt",
         ).to(device)
-        
+
         input_ids = encodings["input_ids"]
         attention_mask = encodings["attention_mask"]
-        
-        # Compute current policy log probs
-        policy_log_probs = self.compute_log_probs(
-            self.model,
-            input_ids,
-            attention_mask,
-            input_ids,
-        )
-        
-        # Compute reference log probs
+        policy_log_probs = self.compute_log_probs(self.model, input_ids, attention_mask, input_ids)
         with torch.no_grad():
-            ref_log_probs = self.compute_log_probs(
-                self.ref_model,
-                input_ids,
-                attention_mask,
-                input_ids,
-            )
-        
-        # Compute ratio and clipped objective
+            ref_log_probs = self.compute_log_probs(self.ref_model, input_ids, attention_mask, input_ids)
+
         log_ratio = policy_log_probs - ref_log_probs
         ratio = torch.exp(log_ratio)
-        
-        # PPO clipped objective
         clipped_ratio = torch.clamp(ratio, 1 - self.config.clip_range, 1 + self.config.clip_range)
-        
-        policy_loss = -torch.min(ratio * advantages, clipped_ratio * advantages).mean()
-        
-        # KL penalty
-        kl_div = (ref_log_probs - policy_log_probs).mean()
-        
-        # Total loss
+        policy_loss = -torch.min(ratio * advantages_tensor, clipped_ratio * advantages_tensor).mean()
+
+        # Positive KL proxy that is stable for per-sample logging.
+        kl_div = torch.mean(torch.exp(log_ratio) - 1.0 - log_ratio)
         loss = policy_loss + self.config.kl_coef * kl_div
-        
+
+        preference_confidence = torch.where(
+            target_tensor > 0.5,
+            torch.sigmoid(log_ratio),
+            1.0 - torch.sigmoid(log_ratio),
+        )
+
         metrics = {
-            "policy_loss": policy_loss.item(),
-            "kl_div": kl_div.item(),
-            "ratio_mean": ratio.mean().item(),
-            "advantage_mean": advantages.mean().item(),
+            "policy_loss": float(policy_loss.item()),
+            "kl_div": float(kl_div.item()),
+            "ratio_mean": float(ratio.mean().item()),
+            "mean_reward": float(preference_confidence.mean().item()),
+            "reward_std": float(preference_confidence.std(unbiased=False).item()),
         }
-        
         return loss, metrics
-    
-    def train(self, data: List[Dict]):
+
+    def _build_scheduler(self, dataset_size: int):
+        from transformers import get_linear_schedule_with_warmup
+
+        steps_per_epoch = math.ceil(dataset_size / max(self.config.batch_size, 1))
+        optimizer_steps = math.ceil(steps_per_epoch / max(self.config.gradient_accumulation_steps, 1))
+        total_steps = max(optimizer_steps * self.config.num_epochs, 1)
+        warmup_steps = int(total_steps * self.config.warmup_ratio)
+        self.scheduler = get_linear_schedule_with_warmup(
+            self.optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_steps,
+        )
+        return total_steps
+
+    def _load_heldout_problems(self) -> List[Dict[str, str]]:
+        if self._heldout_problems is not None:
+            return self._heldout_problems
+
+        try:
+            from data_generator.dataset_loader import GSM8KLoader
+
+            loader = GSM8KLoader(
+                split=self.config.heldout_split,
+                subset_size=self.config.heldout_eval_size,
+            )
+            problems = loader.load()
+            self._heldout_problems = [
+                {"prompt": problem.problem, "answer": problem.answer}
+                for problem in problems
+            ]
+        except Exception as exc:
+            logger.warning("Unable to load held-out GSM8K problems: %s", exc)
+            self._heldout_problems = []
+
+        return self._heldout_problems
+
+    def _generate_greedy_response(self, prompt: str) -> str:
+        messages = [{"role": "user", "content": prompt}]
+        prompt_text = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        inputs = self.tokenizer(
+            prompt_text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=self.config.max_prompt_length,
+        )
+
+        device = next(self.model.parameters()).device
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=self.config.eval_max_new_tokens,
+                do_sample=False,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+
+        prompt_len = inputs["input_ids"].shape[1]
+        return self.tokenizer.decode(outputs[0, prompt_len:], skip_special_tokens=True)
+
+    def evaluate_checkpoint(self, step: int) -> Optional[float]:
         """
-        Train with GRPO.
-        
-        Args:
-            data: List of dicts with reasoning paths (correct and incorrect)
+        Evaluate pass@1 on held-out GSM8K problems every fixed number of optimizer steps.
         """
+        if self.config.verifier_type != "math":
+            logger.info("Skipping held-out checkpoint eval because verifier_type=%s", self.config.verifier_type)
+            return None
+
+        problems = self._load_heldout_problems()
+        if not problems:
+            return None
+
+        self.model.eval()
+        correct = 0
+        rewards: list[float] = []
+
+        for problem in problems:
+            response = self._generate_greedy_response(problem["prompt"])
+            result = self.verifier.verify_reasoning_path(response, problem["answer"])
+            is_correct = result.status.value == "correct"
+            reward = 1.0 if is_correct else 0.0
+            rewards.append(reward)
+            if is_correct:
+                correct += 1
+
+        pass_at_1 = correct / len(problems)
+        log_to_wandb(
+            {
+                f"eval/pass_at_1_step_{step}": pass_at_1,
+                "eval/mean_reward": sum(rewards) / len(rewards) if rewards else 0.0,
+            },
+            step=step,
+        )
+        self.model.train()
+        return pass_at_1
+
+    def train(self, data: List[Dict[str, Any]]):
+        """Train the policy with custom GRPO updates."""
         self.setup()
-        
-        # Create dataset
+
         dataset = GRPODataset(
             data,
             self.tokenizer,
             max_length=self.config.max_length,
             max_prompt_length=self.config.max_prompt_length,
         )
-        
-        logger.info(f"Training on {len(dataset)} prompt groups")
-        
         if len(dataset) == 0:
-            logger.warning("No training data! Check data format.")
+            logger.warning("No GRPO groups available for training.")
             return
-        
-        # Training loop
+
+        total_optimizer_steps = self._build_scheduler(len(dataset))
+        ensure_wandb_run(
+            project=self.config.wandb_project,
+            name="grpo-training",
+            mode=self.config.wandb_mode,
+            config={
+                **asdict(self.config),
+                "dataset_size": len(dataset),
+                "reward_type": self.config.verifier_type,
+                "training_steps": total_optimizer_steps,
+            },
+            tags=["grpo", self.config.verifier_type],
+        )
+
         self.model.train()
         self.optimizer.zero_grad()
         global_step = 0
-        total_loss = 0
-        
-        # Setup training logger for dynamics visualization
-        from pathlib import Path as PathLib
-        log_dir = PathLib(self.config.output_dir) / "training_logs"
+        total_loss = 0.0
+
+        log_dir = Path(self.config.output_dir) / "training_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         metrics_file = log_dir / "training_metrics.jsonl"
-        
+
         from tqdm import tqdm
-        
+
         for epoch in range(self.config.num_epochs):
-            logger.info(f"Epoch {epoch + 1}/{self.config.num_epochs}")
-            epoch_loss = 0
-            
-            pbar = tqdm(range(0, len(dataset), self.config.batch_size), desc=f"Epoch {epoch+1}")
-            for batch_idx in pbar:
-                batch_loss = 0
-                batch_metrics = {"policy_loss": 0, "kl_div": 0, "ratio_mean": 0, "advantage_mean": 0}
-                
-                for i in range(min(self.config.batch_size, len(dataset) - batch_idx)):
-                    group = dataset[batch_idx + i]
-                    
+            logger.info("GRPO epoch %s/%s", epoch + 1, self.config.num_epochs)
+            epoch_loss = 0.0
+            progress = tqdm(range(0, len(dataset), self.config.batch_size), desc=f"Epoch {epoch + 1}")
+            micro_batches_since_update = 0
+
+            for batch_idx in progress:
+                accumulated_loss = 0.0
+                batch_metrics = {
+                    "policy_loss": 0.0,
+                    "kl_div": 0.0,
+                    "ratio_mean": 0.0,
+                    "mean_reward": 0.0,
+                    "reward_std": 0.0,
+                }
+                items_in_batch = min(self.config.batch_size, len(dataset) - batch_idx)
+
+                for item_offset in range(items_in_batch):
+                    group = dataset[batch_idx + item_offset]
                     loss, metrics = self.compute_grpo_loss(
                         group["prompt"],
                         group["chosen"],
                         group["rejected"],
                     )
-                    
-                    # Accumulate gradients
-                    scaled_loss = loss / self.config.gradient_accumulation_steps
-                    scaled_loss.backward()
-                    
-                    batch_loss += loss.item()
-                    for k, v in metrics.items():
-                        batch_metrics[k] = batch_metrics.get(k, 0) + v
-                
-                epoch_loss += batch_loss
-                
-                # Update progress bar
-                pbar.set_postfix({"loss": f"{batch_loss:.4f}"})
-                
-                # Gradient step
-                if (batch_idx // self.config.batch_size + 1) % self.config.gradient_accumulation_steps == 0:
-                    # Compute gradient norm before clipping
-                    total_norm = 0.0
-                    for p in self.model.parameters():
-                        if p.grad is not None:
-                            total_norm += p.grad.data.norm(2).item() ** 2
-                    grad_norm = total_norm ** 0.5
-                    
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
-                    global_step += 1
-                    
-                    # Log training metrics
-                    num_items = min(self.config.batch_size, len(dataset) - batch_idx)
-                    log_entry = {
-                        "step": global_step,
-                        "epoch": epoch + (batch_idx / len(dataset)),
-                        "loss": batch_loss / max(num_items, 1),
-                        "policy_loss": batch_metrics.get("policy_loss", 0) / max(num_items, 1),
-                        "kl_divergence": batch_metrics.get("kl_div", 0) / max(num_items, 1),
-                        "reward_margin": batch_metrics.get("advantage_mean", 0) / max(num_items, 1),
-                        "gradient_norm": grad_norm,
-                        "ratio_mean": batch_metrics.get("ratio_mean", 1.0) / max(num_items, 1),
-                        "learning_rate": self.config.learning_rate,
-                    }
-                    
-                    with open(metrics_file, "a") as f:
-                        f.write(json.dumps(log_entry) + "\n")
-                
-                total_loss += batch_loss
-            
-            avg_epoch_loss = epoch_loss / len(dataset)
-            logger.info(f"Epoch {epoch + 1} complete. Average loss: {avg_epoch_loss:.4f}")
-        
-        logger.info(f"Training logs saved to: {log_dir}")
-        
-        # Save model
+                    (loss / self.config.gradient_accumulation_steps).backward()
+                    accumulated_loss += float(loss.item())
+                    for key, value in metrics.items():
+                        batch_metrics[key] += value
+
+                epoch_loss += accumulated_loss
+                progress.set_postfix({"loss": f"{accumulated_loss / max(items_in_batch, 1):.4f}"})
+                micro_batches_since_update += 1
+
+                is_last_batch = batch_idx + items_in_batch >= len(dataset)
+                if micro_batches_since_update < self.config.gradient_accumulation_steps and not is_last_batch:
+                    total_loss += accumulated_loss
+                    continue
+
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
+                avg_kl = batch_metrics["kl_div"] / max(items_in_batch, 1)
+                lr_reduced = avg_kl > self.config.kl_threshold
+
+                if lr_reduced:
+                    logger.warning(
+                        "KL divergence %.4f exceeded threshold %.4f; reducing LR by 10%% for this step.",
+                        avg_kl,
+                        self.config.kl_threshold,
+                    )
+                    for group in self.optimizer.param_groups:
+                        group["lr"] *= 0.9
+
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+                self.scheduler.step()
+                global_step += 1
+                micro_batches_since_update = 0
+
+                current_lr = self.scheduler.get_last_lr()[0]
+                mean_reward = batch_metrics["mean_reward"] / max(items_in_batch, 1)
+                reward_std = batch_metrics["reward_std"] / max(items_in_batch, 1)
+                log_entry = {
+                    "step": global_step,
+                    "epoch": epoch + (batch_idx / len(dataset)),
+                    "loss": accumulated_loss / max(items_in_batch, 1),
+                    "policy_loss": batch_metrics["policy_loss"] / max(items_in_batch, 1),
+                    "kl_divergence": avg_kl,
+                    "gradient_norm": float(grad_norm),
+                    "ratio_mean": batch_metrics["ratio_mean"] / max(items_in_batch, 1),
+                    "learning_rate": current_lr,
+                    "mean_reward": mean_reward,
+                    "reward_std": reward_std,
+                    "lr_reduced_for_kl": lr_reduced,
+                }
+
+                with open(metrics_file, "a") as handle:
+                    handle.write(json.dumps(log_entry) + "\n")
+
+                log_to_wandb(
+                    {
+                        "train/loss": log_entry["loss"],
+                        "train/policy_loss": log_entry["policy_loss"],
+                        "train/kl_divergence": avg_kl,
+                        "train/gradient_norm": float(grad_norm),
+                        "train/ratio_mean": log_entry["ratio_mean"],
+                        "train/learning_rate": current_lr,
+                        "train/mean_reward": mean_reward,
+                        "train/reward_std": reward_std,
+                    },
+                    step=global_step,
+                )
+
+                if self.config.eval_interval_steps > 0 and global_step % self.config.eval_interval_steps == 0:
+                    self.evaluate_checkpoint(global_step)
+
+                total_loss += accumulated_loss
+
+            logger.info(
+                "Epoch %s complete. Average loss: %.4f",
+                epoch + 1,
+                epoch_loss / max(len(dataset), 1),
+            )
+
         self.save()
-        
         avg_loss = total_loss / max(len(dataset), 1)
-        logger.info(f"Training complete. Average loss: {avg_loss:.4f}")
-    
+        logger.info("GRPO training complete. Average loss: %.4f", avg_loss)
+
     def save(self, path: Optional[str] = None):
-        """Save the model."""
-        save_path = path or self.config.output_dir
-        Path(save_path).mkdir(parents=True, exist_ok=True)
-        
-        if self.config.use_lora:
-            # Merge LoRA weights and save full model
-            logger.info("Merging LoRA weights...")
+        save_path = Path(path or self.config.output_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+
+        if self.config.use_lora and hasattr(self.model, "merge_and_unload"):
+            logger.info("Merging LoRA adapters before save")
             merged_model = self.model.merge_and_unload()
             merged_model.save_pretrained(save_path)
         else:
             self.model.save_pretrained(save_path)
-        
+
         self.tokenizer.save_pretrained(save_path)
-        logger.info(f"Model saved to {save_path}")
+        logger.info("Saved GRPO model to %s", save_path)
 
 
 def train_grpo_from_synthetic_data(
@@ -502,51 +583,44 @@ def train_grpo_from_synthetic_data(
     model_name: str = "Qwen/Qwen2.5-7B-Instruct",
     num_epochs: int = 1,
     batch_size: int = 2,
+    verifier_type: str = "math",
 ):
-    """
-    Convenience function to train GRPO from synthetic data file.
-    """
-    # Load data
+    """Convenience entry point for GRPO training from a JSONL file."""
     data = []
-    with open(data_path) as f:
-        for line in f:
+    with open(data_path) as handle:
+        for line in handle:
             data.append(json.loads(line))
-    
-    logger.info(f"Loaded {len(data)} samples from {data_path}")
-    
-    # Setup config
+
     config = GRPOConfig(
         model_name=model_name,
         output_dir=output_dir,
         num_epochs=num_epochs,
         batch_size=batch_size,
+        verifier_type=verifier_type,
     )
-    
-    # Train
+
     trainer = ReasoningGRPOTrainer(config)
     trainer.train(data)
-    
-    return output_dir
+    return trainer
 
 
 if __name__ == "__main__":
     import argparse
-    
-    parser = argparse.ArgumentParser(description="Train with GRPO")
+
+    parser = argparse.ArgumentParser(description="Train a model with GRPO from synthetic data")
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--output-dir", type=str, default="./grpo_output")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-7B-Instruct")
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-7B-Instruct")
+    parser.add_argument("--num-epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=2)
-    
+    parser.add_argument("--verifier-type", type=str, default="math", choices=["math", "code"])
     args = parser.parse_args()
-    
-    logging.basicConfig(level=logging.INFO)
-    
+
     train_grpo_from_synthetic_data(
         data_path=args.data_path,
         output_dir=args.output_dir,
-        model_name=args.model,
-        num_epochs=args.epochs,
+        model_name=args.model_name,
+        num_epochs=args.num_epochs,
         batch_size=args.batch_size,
+        verifier_type=args.verifier_type,
     )
