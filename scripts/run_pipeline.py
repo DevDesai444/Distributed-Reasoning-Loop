@@ -13,6 +13,7 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from omegaconf import OmegaConf
+from wandb_utils import ensure_wandb_run, get_wandb
 
 logging.basicConfig(
     level=logging.INFO,
@@ -131,6 +132,16 @@ def run_grpo_training(config, data_path, base_model=None):
         batch_size=config.training.batch_size,
         num_epochs=config.training.num_epochs,
         max_length=config.training.dpo.max_length,
+        verifier_type=config.verifier.type,
+        verifier_timeout=config.verifier[config.verifier.type].timeout,
+        code_docker_image=config.verifier.code.docker_image,
+        code_memory_limit=config.verifier.code.memory_limit,
+        kl_threshold=config.training.grpo.kl_threshold,
+        eval_interval_steps=config.training.grpo.eval_interval_steps,
+        heldout_eval_size=config.training.grpo.heldout_eval_size,
+        eval_max_new_tokens=config.training.grpo.eval_max_new_tokens,
+        wandb_project=config.training.wandb.project,
+        wandb_mode=config.training.wandb.mode,
         output_dir=f"{config.general.output_dir}/grpo_model",
     )
     
@@ -271,6 +282,19 @@ def main():
     
     # Load config
     config = OmegaConf.load(args.config)
+
+    if config.training.wandb.enabled:
+        config_payload = OmegaConf.to_container(config, resolve=True)
+        ensure_wandb_run(
+            project=config.training.wandb.project,
+            name=f"pipeline-{args.dataset}",
+            mode=config.training.wandb.mode,
+            config=config_payload,
+            tags=["pipeline", args.dataset],
+        )
+        wandb = get_wandb()
+        if wandb is not None and wandb.run is not None:
+            wandb.config.update(config_payload, allow_val_change=True)
     
     # Create output directory
     Path(config.general.output_dir).mkdir(parents=True, exist_ok=True)
