@@ -98,7 +98,11 @@ class TrainingMethodComparison:
         logger.info(f"Loaded {len(data)} samples from {data_path}")
         return data
     
-    def train_reward_model(self, train_data: List[Dict]) -> None:
+    def train_reward_model(
+        self,
+        train_data: List[Dict],
+        eval_data: Optional[List[Dict]] = None,
+    ) -> None:
         """
         Train the reward model on preference pairs BEFORE using it.
         This gives meaningful learned reward scores instead of random values.
@@ -114,8 +118,8 @@ class TrainingMethodComparison:
         
         config = RewardModelConfig(
             model_name=self.model_name,
-            num_epochs=3,  # Train for a few epochs
-            batch_size=2,  # Small batch for memory
+            num_epochs=3,
+            batch_size=8,
             learning_rate=1e-5,
             max_length=1024,
             output_dir=str(self.output_dir / "reward_model"),
@@ -129,7 +133,7 @@ class TrainingMethodComparison:
         
         # Train on preference pairs (chosen > rejected)
         start_time = time.time()
-        self.reward_model.train_model(train_data)
+        self.reward_model.train_model(train_data, eval_data)
         train_time = time.time() - start_time
         
         self.reward_model.eval()
@@ -528,7 +532,7 @@ class TrainingMethodComparison:
         # 0. Train Reward Model FIRST on preference pairs
         # This gives us meaningful reward scores for evaluation
         logger.info("Step 0: Training reward model on preference pairs...")
-        self.train_reward_model(train_data)
+        self.train_reward_model(train_data, eval_data)
         
         # 1. Baseline (no training)
         if "none" in methods:
@@ -561,7 +565,26 @@ class TrainingMethodComparison:
     
     def _print_comparison_table(self):
         """Print a formatted comparison table."""
-        from tabulate import tabulate
+        try:
+            from tabulate import tabulate
+        except ImportError:
+            print("\n" + "╔" + "═"*70 + "╗")
+            print("║" + " COMPARISON RESULTS ".center(70) + "║")
+            print("╚" + "═"*70 + "╝\n")
+            print("Method | Accuracy | Correct Reward | Chosen (learned) | Rejected (learned) | Margin | Train Time")
+            print("-" * 110)
+            for metrics in self.results.values():
+                train_time = f"{metrics.training_time:.1f}s" if metrics.training_time > 0 else "N/A"
+                print(
+                    f"{metrics.method_name} | "
+                    f"{metrics.accuracy:.4f} | "
+                    f"{metrics.avg_reward:.4f} | "
+                    f"{metrics.avg_chosen_reward:.4f} | "
+                    f"{metrics.avg_rejected_reward:.4f} | "
+                    f"{metrics.reward_margin:+.4f} | "
+                    f"{train_time}"
+                )
+            return
 
         print("\n" + "╔" + "═"*70 + "╗")
         print("║" + " COMPARISON RESULTS ".center(70) + "║")
