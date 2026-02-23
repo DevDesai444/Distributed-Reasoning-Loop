@@ -30,8 +30,10 @@ setup(
         
         # Utils
         "tqdm>=4.65.0",
+        "wandb>=0.16.0",
         "hydra-core>=1.3.0",
         "omegaconf>=2.3.0",
+        "tabulate>=0.9.0",
     ],
     extras_require={
         "inference": [

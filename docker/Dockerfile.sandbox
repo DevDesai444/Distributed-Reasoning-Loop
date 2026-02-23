@@ -26,6 +26,10 @@ RUN pip install --user --no-cache-dir \
 # Set resource limits
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV EXECUTION_MEMORY_LIMIT=512m
+ENV EXECUTION_NETWORK_POLICY=none
 
-# Default command
-CMD ["python3"]
+# Runtime isolation is enforced by the caller with:
+#   docker run --network none --memory 512m ...
+# The container defaults to reading a Python program from stdin.
+CMD ["python3", "-I", "-u", "-"]
