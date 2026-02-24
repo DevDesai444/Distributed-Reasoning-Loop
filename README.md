@@ -49,7 +49,7 @@ That is why the project is centered on verifiable domains:
 ```mermaid
 flowchart LR
     A["Dataset Loaders<br/>GSM8K / MATH / HumanEval / MBPP"] --> B["Reasoning Generation<br/>vLLM / SGLang / Transformers"]
-    B --> C["Verification Layer<br/>SymPy math checks / Docker code execution"]
+    B --> C["Verification Layer<br/>SymPy math checks / Docker execution verifier"]
     C --> D["Preprocessing<br/>normalization, filtering, dedup, pair selection"]
     D --> E["Training<br/>SFT / DPO / GRPO / reward models"]
     E --> F["Evaluation<br/>benchmarks, pass@k, TTC"]
@@ -69,11 +69,12 @@ flowchart LR
 | `Ray` | distributed verification, tokenization, and batch preparation workers | parallelizes expensive preprocessing and verification stages |
 | `Kafka` | optional streaming abstraction between pipeline stages | decouples generation, verification, and training data flow |
 | `SymPy` | math answer extraction and symbolic or numeric equivalence checks | gives objective supervision for math tasks |
-| `Docker` | sandboxed code execution for generated programs | safer verification for untrusted code completions |
+| `Docker` | sandboxed code execution for generated programs | isolates execution-verifier runs for untrusted code completions |
 | `TRL` | DPO and SFT trainer wrappers | speeds up preference-learning experiments |
 | `PEFT` / LoRA | parameter-efficient fine-tuning in DPO, GRPO, and SFT trainers | lowers memory cost and makes experiments more practical |
 | `datasets` | benchmark loading from Hugging Face | standardizes problem ingestion for GSM8K, HumanEval, MBPP, and MATH |
 | `OmegaConf` / `hydra-core` | configuration loading | keeps phase-level settings centralized |
+| `Weights & Biases` | optional offline-first experiment logging | captures GRPO curves, verifier metrics, and reward-margin histograms |
 | `pytest` | unit and integration-style tests | validates core data structures and verifier behavior |
 
 ## Repository Layout
@@ -81,7 +82,7 @@ flowchart LR
 ```text
 .
 ├── config/
-│   └── default.yaml              default settings for generation, orchestration, training, and inference
+│   └── default.yaml              default settings for generation, verifier selection, training, and inference
 ├── data/
 │   ├── *.jsonl / *.json          bundled sample outputs from prior runs
 │   └── checkpoints/              intermediate pipeline checkpoints
@@ -104,8 +105,8 @@ flowchart LR
 │   └── visualize_training.py
 ├── src/
 │   ├── data_generator/           dataset loading, prompting, generation, preprocessing, pipeline assembly
-│   ├── verifier/                 math and code verification
-│   ├── training/                 DPO, GRPO, SFT, reward models
+│   ├── verifier/                 math, execution, and step-level verification utilities
+│   ├── training/                 DPO, GRPO, SFT, outcome reward models, process reward models
 │   ├── inference/                vLLM, SGLang, speculative decoding
 │   ├── orchestration/            Ray workers, Kafka adapters, KV-cache managers
 │   └── evaluation/               benchmark runners and test-time compute
@@ -152,6 +153,14 @@ The verifier layer is what makes the project different from a generic synthetic-
 - compares answers by exact match, numeric equivalence, or symbolic equivalence,
 - and specializes GSM8K checking through `GSM8KVerifier`.
 
+`src/verifier/execution_verifier.py`
+
+- runs Python code plus injected tests in a Docker-isolated subprocess,
+- returns `PASS`, `FAIL`, `TIMEOUT`, or `COMPILE_ERROR`,
+- assigns partial penalties for timeout and compile failures,
+- supports thread-pooled batch verification,
+- and logs latency plus error distributions to W&B when enabled.
+
 `src/verifier/code_verifier.py`
 
 - extracts code blocks,
@@ -159,7 +168,13 @@ The verifier layer is what makes the project different from a generic synthetic-
 - supports multiple languages in the sandbox abstraction,
 - and provides `HumanEvalVerifier` for execution-based correctness checks.
 
-This stage turns raw generations into binary supervision signals with confidence metadata.
+`src/verifier/step_extractor.py`
+
+- splits long-form reasoning into newline-level steps,
+- filters out short fragments,
+- and supports process reward model supervision and reranking.
+
+This stage turns raw generations into binary or scalar supervision signals with confidence and latency metadata.
 
 ### 4. Preprocess and build preference data
 
@@ -197,7 +212,8 @@ Training is split into separate modules because each method expects different su
 - groups correct and incorrect responses by prompt,
 - computes normalized group-relative advantages,
 - applies a PPO-style clipped objective with a KL term,
-- and does not require a separate reward model.
+- logs KL divergence, mean reward, reward spread, and held-out pass@1 checkpoints,
+- and can instantiate either a math verifier or the execution verifier from config.
 
 `src/training/sft_trainer.py`
 
@@ -206,8 +222,17 @@ Training is split into separate modules because each method expects different su
 
 `src/training/reward_model.py`
 
-- provides an outcome reward model and a process reward model,
-- mainly for research extensions and scoring experiments rather than the default path.
+- implements a learned Bradley-Terry outcome reward model,
+- trains directly from prompt / chosen / rejected JSONL pairs,
+- logs reward-margin histograms after each epoch,
+- and saves checkpoints under `outputs/reward_model/`.
+
+`src/training/process_reward_model.py`
+
+- builds step-level supervision from reasoning traces,
+- writes labeled steps to `synthetic_data/step_labels.jsonl`,
+- trains a process reward model on diverging steps,
+- and reranks candidate solutions by mean step reward.
 
 ### 6. Evaluate the trained system
 
@@ -223,6 +248,12 @@ Training is split into separate modules because each method expects different su
 - majority-vote self-consistency,
 - beam search,
 - MCTS-style reasoning search.
+
+It now also supports:
+
+- outcome reward model reranking,
+- process reward model reranking,
+- and direct PRM-vs-ORM comparisons over the same candidate set.
 
 The design choice here is intentional: I wanted training-time improvements and inference-time scaling to live in the same repo so they could be compared directly.
 
@@ -298,7 +329,8 @@ More specialized scripts include:
 - `scripts/run_pipeline.py` for the full configurable workflow
 - `scripts/run_ray_pipeline.py` for an opinionated SGLang -> Ray -> GRPO demo
 - `scripts/eval_pass_at_k.py` for test-time compute scaling experiments
-- `scripts/eval_finetuned.py` for base-vs-finetuned comparisons
+- `scripts/eval_finetuned.py` for base-vs-finetuned comparisons and `outputs/training_improvement.json`
+- `scripts/eval_prm_vs_orm.py` for head-to-head PRM vs ORM reranking
 - `scripts/compare_training_methods.py` for method-level evaluation
 - `scripts/benchmark_throughput.py` for systems benchmarking
 - `scripts/visualize_training.py` for RL training-dynamics inspection
@@ -310,6 +342,12 @@ Install the base environment:
 ```bash
 pip install -r requirements.txt
 pip install -e .
+```
+
+If you want execution-based code verification, build the sandbox image first:
+
+```bash
+docker build -t distributed-reasoning-loop-sandbox:latest -f docker/Dockerfile.sandbox .
 ```
 
 Generate synthetic reasoning data:
@@ -348,6 +386,24 @@ python scripts/run_pipeline.py \
   --dataset gsm8k \
   --subset-size 100 \
   --training-method grpo
+```
+
+Compare base and GRPO checkpoints on the same held-out problems:
+
+```bash
+python scripts/eval_finetuned.py \
+  --base-model Qwen/Qwen2.5-1.5B-Instruct \
+  --finetuned-model ./outputs/grpo_model \
+  --output ./outputs/training_improvement.json
+```
+
+Compare PRM reranking against ORM reranking:
+
+```bash
+python scripts/eval_prm_vs_orm.py \
+  --model ./outputs/grpo_model \
+  --reward-model-path ./outputs/reward_model \
+  --process-reward-model-path ./outputs/process_reward_model
 ```
 
 Evaluate a model:
@@ -389,6 +445,7 @@ The strongest, most integrated path in the codebase is:
 - math verification,
 - preprocessing and DPO pair construction,
 - DPO or GRPO training,
+- outcome reward modeling,
 - benchmark evaluation,
 - plus optional Ray-based parallel processing.
 
@@ -397,10 +454,11 @@ The strongest, most integrated path in the codebase is:
 Some parts of the repository are clearly research extensions rather than the default path:
 
 - Kafka streaming abstractions
-- reward modeling and process reward modeling
 - speculative decoding
 - MCTS and beam-search-style inference
 - throughput benchmarking utilities
+
+The newer but still less battle-tested path is execution-verified code training, because it depends on a working local Docker runtime and sandbox image in addition to the Python stack.
 
 The code is organized so those ideas can be tested without being mandatory for the main pipeline.
 
@@ -411,6 +469,8 @@ There are a few areas where the codebase is broader than the fully integrated pa
 - `MBPP` loading exists, but the cleanest verified code path is still centered on `HumanEval`.
 - Kafka and distributed cache layers are available abstractions, but the simplest local loop does not depend on them.
 - Several inference and benchmarking utilities are designed for experimentation and may assume local services or heavyweight dependencies are already running.
+- The execution verifier requires the Docker CLI plus the sandbox image `distributed-reasoning-loop-sandbox:latest`.
+- W&B logging is optional and defaults cleanly to offline mode in the updated training flow.
 
 ## Why The Architecture Looks Like This
 
