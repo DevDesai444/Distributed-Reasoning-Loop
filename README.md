@@ -1,193 +1,189 @@
 # Distributed Reasoning Loop
 
-Created and maintained by `DevDesai-444`.
+Author: **Dev Desai**
 
-I built Distributed Reasoning Loop as a research engineering project around one idea:
+Distributed Reasoning Loop is a research engineering project that asks a practical question:
 
-> if a task can be verified automatically, I can use that verifier to create training signals for reasoning models at scale.
+> Can we improve reasoning models by generating many candidate solutions, automatically verifying them, and feeding that signal back into training and inference?
 
-This repository combines synthetic chain-of-thought generation, answer checking, preference construction, RL-style fine-tuning, distributed processing, inference optimization, and benchmark evaluation in one modular Python codebase.
+This repository implements that loop end to end for verifiable reasoning domains such as grade-school math and code generation. It combines synthetic data generation, symbolic and execution-based verification, preference construction, reinforcement-learning-style fine-tuning, reward modeling, distributed orchestration, and test-time compute into one modular Python system.
 
-## What This Project Is
+The result is a codebase designed not just to train a model, but to study how correctness can become scalable supervision.
 
-Distributed Reasoning Loop is not a single API service or one narrow training script. It is a full experimentation stack for verifiable reasoning tasks such as math and code.
+## Executive Summary
 
-At a high level, the loop is:
+Large language models can produce convincing reasoning traces that are still wrong. My hypothesis for this project was that if I restrict the problem space to tasks with objective checkers, then I can turn correctness into a usable feedback signal across the full stack:
 
-1. Load a benchmark problem.
-2. Generate multiple reasoning paths with a teacher or serving backend.
-3. Verify which paths are correct.
-4. Filter and deduplicate the results.
-5. Convert verified outcomes into DPO pairs or GRPO groups.
-6. Fine-tune a reasoning model.
-7. Evaluate the model with standard benchmarks and test-time compute methods.
+1. Generate many reasoning trajectories per prompt.
+2. Verify them automatically with domain-specific checkers.
+3. Filter, deduplicate, and structure them into training signals.
+4. Improve the model with SFT, DPO, GRPO, and learned reward models.
+5. Further improve answer quality at inference time through reranking and test-time compute.
 
-The repository is designed to answer three research questions:
+This repository is the implementation of that hypothesis.
 
-- Can correctness act as scalable supervision for reasoning?
-- Can I turn verified generations into useful DPO or GRPO training data?
-- Can better inference systems and distributed orchestration make this loop practical?
+## Research Hypothesis
 
-## Core Thesis
+The central hypothesis behind this work is:
 
-Most of the repository exists to support a single training philosophy:
+> In verifiable domains, objective correctness signals can substitute for a large fraction of expensive human preference labeling and still drive measurable gains in reasoning quality.
 
-- generate many candidate solutions,
-- check them with objective verifiers,
-- keep the good ones,
-- contrast them against bad ones,
-- and train the model on that signal.
+That breaks down into four smaller hypotheses:
 
-That is why the project is centered on verifiable domains:
+1. **Verification can create scalable labels.**
+   If a math expression can be checked symbolically or code can be executed in a sandbox, then each model sample becomes a labeled outcome.
+2. **Contrasting correct and incorrect reasoning is useful for alignment.**
+   Preference pairs and grouped outcomes should teach the model not just what the answer is, but what better reasoning looks like.
+3. **Inference-time selection matters almost as much as training-time improvement.**
+   A stronger generator is useful, but reranking and best-of-n search can unlock more value from the same base model.
+4. **Systems design determines feasibility.**
+   This loop only becomes practical if generation, verification, preprocessing, and evaluation can be parallelized and measured.
 
-- `gsm8k` and `math` for symbolic or numeric checking,
-- `humaneval` for execution-based code verification,
-- and partially `mbpp` as an additional code dataset entry point.
+## What This Repository Does
 
-## Architecture
+This project is a full experimentation stack for verified reasoning, including:
+
+- Multi-backend reasoning generation using `transformers`, `vLLM`, and `SGLang`
+- Dataset normalization for `GSM8K`, `MATH`, `HumanEval`, and `MBPP`
+- Symbolic math verification and Docker-isolated code execution verification
+- Synthetic dataset construction for SFT, DPO, and GRPO workflows
+- Learned outcome reward models and process reward models
+- Test-time compute strategies such as best-of-n, majority vote, and reranking
+- Optional Ray and Kafka components for scaling distributed stages
+- Benchmarking and experiment scripts for throughput, pass@k, and training comparisons
+
+## System Architecture
 
 ```mermaid
 flowchart LR
-    A["Dataset Loaders<br/>GSM8K / MATH / HumanEval / MBPP"] --> B["Reasoning Generation<br/>vLLM / SGLang / Transformers"]
-    B --> C["Verification Layer<br/>SymPy math checks / Docker execution verifier"]
-    C --> D["Preprocessing<br/>normalization, filtering, dedup, pair selection"]
-    D --> E["Training<br/>SFT / DPO / GRPO / reward models"]
-    E --> F["Evaluation<br/>benchmarks, pass@k, TTC"]
-    E --> G["Inference Utilities<br/>vLLM, SGLang, speculative decoding"]
-    B --> H["Orchestration<br/>Ray workers / Kafka streaming / KV cache"]
+    A["Benchmark Loaders<br/>GSM8K / MATH / HumanEval / MBPP"] --> B["Reasoning Generator<br/>Transformers / vLLM / SGLang"]
+    B --> C["Verification Layer<br/>Math Verifier / Docker Execution Verifier"]
+    C --> D["Filtering + Deduplication<br/>Preprocessing / Sample Selection"]
+    D --> E["Training Signals<br/>SFT / DPO / GRPO / Reward Models"]
+    E --> F["Evaluation Layer<br/>Benchmarks / pass@k / TTC"]
+    E --> G["Inference Stack<br/>ORM / PRM / Speculative Decoding"]
+    B --> H["Distributed Runtime<br/>Ray Workers / Kafka / KV Cache"]
+    H --> C
     H --> D
     H --> G
 ```
 
-## Why Each Major Piece Exists
+## Closed-Loop Learning Design
 
-| Component | How it is used in this repo | Why it is used |
-|---|---|---|
-| `torch` + `transformers` | model loading, tokenization, generation, custom training loops | this is the base LLM runtime for almost everything |
-| `vLLM` | batched reasoning generation and OpenAI-compatible serving | efficient multi-sample generation for synthetic data and inference |
-| `SGLang` | reasoning generation, batched prompt execution, prefix-aware inference | useful for repeated prompt structures and RadixAttention-style reuse |
-| `Ray` | distributed verification, tokenization, and batch preparation workers | parallelizes expensive preprocessing and verification stages |
-| `Kafka` | optional streaming abstraction between pipeline stages | decouples generation, verification, and training data flow |
-| `SymPy` | math answer extraction and symbolic or numeric equivalence checks | gives objective supervision for math tasks |
-| `Docker` | sandboxed code execution for generated programs | isolates execution-verifier runs for untrusted code completions |
-| `TRL` | DPO and SFT trainer wrappers | speeds up preference-learning experiments |
-| `PEFT` / LoRA | parameter-efficient fine-tuning in DPO, GRPO, and SFT trainers | lowers memory cost and makes experiments more practical |
-| `datasets` | benchmark loading from Hugging Face | standardizes problem ingestion for GSM8K, HumanEval, MBPP, and MATH |
-| `OmegaConf` / `hydra-core` | configuration loading | keeps phase-level settings centralized |
-| `Weights & Biases` | optional offline-first experiment logging | captures GRPO curves, verifier metrics, and reward-margin histograms |
-| `pytest` | unit and integration-style tests | validates core data structures and verifier behavior |
+```mermaid
+flowchart TD
+    P["Problem"] --> G["Generate k Reasoning Paths"]
+    G --> V["Verify Each Path"]
+    V -->|Correct| POS["Positive Signals"]
+    V -->|Incorrect| NEG["Negative Signals"]
+    POS --> PAIRS["Build Preference Pairs / Groups"]
+    NEG --> PAIRS
+    PAIRS --> TRAIN["Train Policy / Reward Models"]
+    TRAIN --> EVAL["Evaluate + Rerank"]
+    EVAL --> NEXT["Use Findings to Improve Generation + Training Configs"]
+```
 
-## Repository Layout
+## Why This Project Is Interesting
+
+Most reasoning repos focus on one slice of the stack: only inference, only RLHF, only evaluation, or only a dataset pipeline. I intentionally built this repository to cover the whole loop because the interesting behavior emerges from the interactions between components:
+
+- A verifier is only useful if generation produces enough diversity.
+- Preference optimization is only useful if preprocessing forms meaningful contrasts.
+- Reward models are only useful if they can be compared against direct verification.
+- Distributed infrastructure only matters if the experimentation loop is broad enough to become expensive.
+
+This makes the repository both a modeling project and a systems project.
+
+## Repository Structure
 
 ```text
 .
 ├── config/
-│   └── default.yaml              default settings for generation, verifier selection, training, and inference
+│   └── default.yaml
 ├── data/
-│   ├── *.jsonl / *.json          bundled sample outputs from prior runs
-│   └── checkpoints/              intermediate pipeline checkpoints
+│   ├── *.json / *.jsonl
+│   └── checkpoints/
 ├── docker/
-│   ├── Dockerfile.inference      GPU-oriented vLLM inference image
-│   ├── Dockerfile.worker         Ray worker image
-│   ├── Dockerfile.sandbox        secure code-execution sandbox
-│   ├── docker-compose.yml        full multi-service deployment
-│   └── docker-compose.dev.yml    lighter local development stack
+│   ├── Dockerfile.inference
+│   ├── Dockerfile.worker
+│   ├── Dockerfile.sandbox
+│   ├── docker-compose.yml
+│   └── docker-compose.dev.yml
 ├── scripts/
 │   ├── generate_synthetic_data.py
-│   ├── train_dpo.py
 │   ├── run_pipeline.py
+│   ├── train_dpo.py
 │   ├── evaluate.py
-│   ├── run_ray_pipeline.py
 │   ├── eval_pass_at_k.py
 │   ├── eval_finetuned.py
 │   ├── compare_training_methods.py
 │   ├── benchmark_throughput.py
-│   └── visualize_training.py
+│   ├── visualize_training.py
+│   ├── eval_prm_vs_orm.py
+│   └── run_ray_pipeline.py
 ├── src/
-│   ├── data_generator/           dataset loading, prompting, generation, preprocessing, pipeline assembly
-│   ├── verifier/                 math, execution, and step-level verification utilities
-│   ├── training/                 DPO, GRPO, SFT, outcome reward models, process reward models
-│   ├── inference/                vLLM, SGLang, speculative decoding
-│   ├── orchestration/            Ray workers, Kafka adapters, KV-cache managers
-│   └── evaluation/               benchmark runners and test-time compute
-├── tests/                        unit tests for core data and verifier logic
-├── main.py                       convenience CLI entrypoint
-├── setup.py                      package metadata and extras
-├── requirements.txt              base dependency list
-└── METRICS.md                    recorded experiment snapshot
+│   ├── data_generator/
+│   ├── verifier/
+│   ├── training/
+│   ├── inference/
+│   ├── orchestration/
+│   └── evaluation/
+├── tests/
+├── main.py
+├── METRICS.md
+├── comparison_results.json
+├── pass_at_k_results.json
+├── throughput_results.json
+├── requirements.txt
+└── setup.py
 ```
 
-## The Main End-to-End Workflow
+## Core Components
 
-### 1. Load benchmark problems
+### 1. Dataset and Problem Abstraction
 
-`src/data_generator/dataset_loader.py` provides a common `Problem` abstraction and loader classes for:
+`src/data_generator/dataset_loader.py` standardizes multiple datasets behind a common `Problem` representation. That matters because the rest of the pipeline can treat math and code tasks as uniformly as possible while still preserving domain-specific metadata such as `entry_point`, `test`, or reference answers.
 
-- `GSM8KLoader`
-- `HumanEvalLoader`
-- `MBPPLoader`
-- `MATHLoader`
+Supported dataset entry points include:
 
-This matters because the rest of the system can operate on one normalized problem shape instead of special-casing every dataset downstream.
+- `GSM8K`
+- `MATH`
+- `HumanEval`
+- `MBPP`
 
-### 2. Generate multiple reasoning paths
+### 2. Multi-Backend Reasoning Generation
 
-`src/data_generator/cot_generator.py` is the generation layer.
+`src/data_generator/cot_generator.py` handles reasoning-path generation. The generator supports:
 
-It supports three backends:
+- `transformers` for straightforward local generation
+- `vLLM` for efficient batched generation and serving
+- `SGLang` for structured prompt execution and prefix-aware inference
 
-- `vllm` for high-throughput local generation,
-- `sglang` for server-based reasoning generation and prefix reuse,
-- `transformers` as a fallback path.
+Each problem can produce multiple candidate trajectories, which are wrapped with metadata and hashed so downstream filtering and deduplication can operate deterministically.
 
-The generator builds chat-style prompts for math and code separately, samples multiple reasoning paths per problem, and wraps them in a `ReasoningPath` object with metadata and a stable hash.
+### 3. Verification Layer
 
-### 3. Verify the outputs
+The verification layer is the core differentiator of the project.
 
-The verifier layer is what makes the project different from a generic synthetic-data pipeline.
+#### Math Verification
 
-`src/verifier/math_verifier.py`
+`src/verifier/math_verifier.py` extracts and normalizes final answers, then compares predicted and expected answers through exact, numeric, and symbolic equivalence logic. This allows the pipeline to score reasoning traces without requiring manual inspection.
 
-- extracts final answers from model output,
-- normalizes formatting,
-- compares answers by exact match, numeric equivalence, or symbolic equivalence,
-- and specializes GSM8K checking through `GSM8KVerifier`.
+#### Code Verification
 
-`src/verifier/execution_verifier.py`
+`src/verifier/execution_verifier.py` and `src/verifier/code_verifier.py` execute generated code in Docker-isolated sandboxes with:
 
-- runs Python code plus injected tests in a Docker-isolated subprocess,
-- returns `PASS`, `FAIL`, `TIMEOUT`, or `COMPILE_ERROR`,
-- assigns partial penalties for timeout and compile failures,
-- supports thread-pooled batch verification,
-- and logs latency plus error distributions to W&B when enabled.
+- no network access
+- restricted memory
+- limited CPU allocation
+- read-only container execution
+- capped process counts
 
-`src/verifier/code_verifier.py`
+This gives the project an objective way to score code-generation outputs while reducing the risk of executing arbitrary model-produced code on the host environment.
 
-- extracts code blocks,
-- runs code inside Docker sandboxes,
-- supports multiple languages in the sandbox abstraction,
-- and provides `HumanEvalVerifier` for execution-based correctness checks.
+### 4. Synthetic Data Construction
 
-`src/verifier/step_extractor.py`
-
-- splits long-form reasoning into newline-level steps,
-- filters out short fragments,
-- and supports process reward model supervision and reranking.
-
-This stage turns raw generations into binary or scalar supervision signals with confidence and latency metadata.
-
-### 4. Preprocess and build preference data
-
-`src/data_generator/data_preprocessor.py` handles:
-
-- normalization,
-- answer-presence checks,
-- rough reasoning-quality checks,
-- repetitive-output filtering,
-- near-duplicate removal,
-- and smart DPO pair creation.
-
-`src/data_generator/synthetic_data_pipeline.py` ties generation, verification, checkpointing, preprocessing, and final artifact writing together. Its outputs include:
+`src/data_generator/synthetic_data_pipeline.py` turns raw model outputs into reusable training artifacts:
 
 - `all_samples.jsonl`
 - `filtered_samples.jsonl`
@@ -197,301 +193,310 @@ This stage turns raw generations into binary or scalar supervision signals with 
 - `full_pairs.jsonl`
 - `stats.json`
 
-### 5. Train the model
+The preprocessing stage handles:
 
-Training is split into separate modules because each method expects different supervision shapes.
+- answer extraction checks
+- formatting cleanup
+- repetitive-output filtering
+- near-duplicate reduction
+- diversity-aware positive/negative pairing
 
-`src/training/dpo_trainer.py`
+### 5. Training Stack
 
-- consumes prompt / chosen / rejected preference pairs,
-- optionally uses LoRA,
-- and wraps TRL's DPO trainer for preference optimization.
+The repository supports multiple forms of post-training because different supervision structures answer different questions.
 
-`src/training/grpo_trainer.py`
+#### Supervised Fine-Tuning
 
-- groups correct and incorrect responses by prompt,
-- computes normalized group-relative advantages,
-- applies a PPO-style clipped objective with a KL term,
-- logs KL divergence, mean reward, reward spread, and held-out pass@1 checkpoints,
-- and can instantiate either a math verifier or the execution verifier from config.
+`src/training/sft_trainer.py` trains on verified correct trajectories and acts as a clean warm-start baseline.
 
-`src/training/sft_trainer.py`
+#### Direct Preference Optimization
 
-- trains on verified correct paths only,
-- and acts as an optional warm-start stage before preference optimization.
+`src/training/dpo_trainer.py` uses chosen/rejected pairs derived from verifier outcomes. This is the most direct way to test whether verified contrasts can stand in for manually labeled preference data.
 
-`src/training/reward_model.py`
+#### Group Relative Policy Optimization
 
-- implements a learned Bradley-Terry outcome reward model,
-- trains directly from prompt / chosen / rejected JSONL pairs,
-- logs reward-margin histograms after each epoch,
-- and saves checkpoints under `outputs/reward_model/`.
+`src/training/grpo_trainer.py` groups outputs by prompt and optimizes relative advantages across correct and incorrect responses. The implementation includes:
 
-`src/training/process_reward_model.py`
+- group-based reward assignment
+- PPO-style clipping
+- KL regularization against a reference model
+- optional LoRA fine-tuning
+- held-out verifier-backed evaluation
+- offline-friendly W&B logging
 
-- builds step-level supervision from reasoning traces,
-- writes labeled steps to `synthetic_data/step_labels.jsonl`,
-- trains a process reward model on diverging steps,
-- and reranks candidate solutions by mean step reward.
+#### Outcome Reward Model
 
-### 6. Evaluate the trained system
+`src/training/reward_model.py` trains a Bradley-Terry style reward model on prompt/chosen/rejected pairs. It assigns scalar preference scores to full trajectories and supports reranking during inference.
 
-`src/evaluation/benchmarks.py` provides benchmark evaluators for:
+#### Process Reward Model
 
-- GSM8K,
-- HumanEval,
-- MATH.
+`src/training/process_reward_model.py` decomposes reasoning traces into steps, labels those steps, and learns a step-level scoring function. This enables reranking based on intermediate reasoning quality rather than only final outcomes.
 
-`src/evaluation/test_time_compute.py` adds inference-time search and selection methods such as:
+### 6. Inference and Test-Time Compute
 
-- best-of-n,
-- majority-vote self-consistency,
-- beam search,
-- MCTS-style reasoning search.
+`src/evaluation/test_time_compute.py` provides the inference-time experimentation layer. Implemented strategies include:
 
-It now also supports:
+- best-of-n sampling
+- majority-vote self-consistency
+- weighted selection
+- beam-style search
+- MCTS-style search
+- outcome reward model reranking
+- process reward model reranking
 
-- outcome reward model reranking,
-- process reward model reranking,
-- and direct PRM-vs-ORM comparisons over the same candidate set.
+This is important because one of the central questions of the project is whether a better verifier-and-reranker stack can extract higher quality answers even before additional model training.
 
-The design choice here is intentional: I wanted training-time improvements and inference-time scaling to live in the same repo so they could be compared directly.
+### 7. Distributed Systems Layer
 
-## Distributed and Systems Layer
+The orchestration modules extend the project beyond a single-script prototype:
 
-This project is not only about model training. It also explores the systems side of reasoning pipelines.
+- `src/orchestration/ray_workers.py` distributes verification and tokenization work
+- `src/orchestration/kafka_streaming.py` provides stage decoupling for pipeline events
+- `src/orchestration/kv_cache_manager.py` captures prefix/cache-oriented serving concerns
 
-### Ray
+This layer exists because reasoning loops become expensive quickly. Once every prompt produces many trajectories and every trajectory may be verified, filtered, tokenized, and reranked, the bottleneck stops being only model quality and becomes systems throughput.
 
-`src/orchestration/ray_workers.py` contains:
+## End-to-End Workflow
 
-- verification workers,
-- tokenization workers,
-- batch preparation workers,
-- a `DistributedDataProcessor`,
-- and a Kafka-to-Ray bridge.
+```mermaid
+sequenceDiagram
+    participant U as User Script
+    participant D as Dataset Loader
+    participant G as Generator
+    participant V as Verifier
+    participant P as Preprocessor
+    participant T as Trainer
+    participant E as Evaluator
 
-This lets the expensive middle of the pipeline scale beyond a single Python process.
+    U->>D: Load benchmark subset
+    D-->>U: Normalized problems
+    U->>G: Generate multiple reasoning paths
+    G-->>U: Candidate trajectories
+    U->>V: Verify each trajectory
+    V-->>U: Correctness + confidence
+    U->>P: Filter, dedup, pair, checkpoint
+    P-->>U: Training artifacts
+    U->>T: Run SFT / DPO / GRPO / RM
+    T-->>U: Fine-tuned policy or scorer
+    U->>E: Evaluate with pass@k and TTC
+    E-->>U: Accuracy, latency, scaling metrics
+```
 
-### Kafka
+## Experimental Results
 
-`src/orchestration/kafka_streaming.py` defines:
+This repository already contains recorded experiment artifacts that show the loop is useful.
 
-- producer and consumer wrappers,
-- stage-specific reasoning data producers and consumers,
-- topic setup utilities.
+### Fine-Tuning Comparison
 
-Kafka is optional here. It is present for decoupled streaming workflows, not because the default local pipeline requires it.
+From `comparison_results.json`:
 
-### KV cache and prefix reuse
+| Metric | Base Model | Fine-Tuned Model | Absolute Gain |
+|---|---:|---:|---:|
+| Pass@1 | 35.0% | 55.0% | +20.0 pts |
+| Pass@4 | 65.0% | 75.0% | +10.0 pts |
+| Pass@8 | 80.0% | 90.0% | +10.0 pts |
+| Avg. reasoning steps | 14.79 | 17.03 | +2.24 |
+| Inference time / problem | 7.65s | 8.70s | +1.05s |
 
-`src/orchestration/kv_cache_manager.py` implements:
+Interpretation:
 
-- a local LRU-style KV cache,
-- a radix-tree cache for prefix matching,
-- a Ray-backed distributed KV cache abstraction.
+- The fine-tuned model improved single-shot success substantially.
+- Gains remain visible at higher `k`, suggesting better candidate quality rather than only better selection.
+- The fine-tuned model produces longer reasoning traces, which likely contributes to both higher quality and slightly higher latency.
 
-This exists because repeated reasoning prompts share long prefixes, and cached prefixes can materially improve throughput in multi-sample generation.
+### pass@k Scaling
 
-## Inference Utilities
+From `pass_at_k_results.json`:
 
-`src/inference/vllm_engine.py`
+| k | Accuracy |
+|---|---:|
+| 1 | 35.0% |
+| 4 | 65.0% |
+| 8 | 70.0% |
 
-- wraps vLLM generation,
-- supports logprobs and batched chain-of-thought sampling.
+This supports a second important conclusion: generation diversity plus selection already improves outcomes, even before deeper reranking or reward-model intervention.
 
-`src/inference/sglang_engine.py`
+### Throughput and Systems Findings
 
-- wraps SGLang programs,
-- supports multi-path reasoning generation and multi-turn refinement.
+From `throughput_results.json`:
 
-`src/inference/speculative_decoding.py`
+| Benchmark | Result |
+|---|---|
+| End-to-end pipeline throughput | 49.09 samples/sec |
+| Prefix cache throughput | 49.5 samples/sec |
+| No prefix cache throughput | 19.89 samples/sec |
+| Verifier throughput | 35,526.13 samples/sec |
 
-- implements draft/target speculative decoding,
-- tracks acceptance statistics,
-- and includes a tree-based speculative variant.
+The most notable systems result is prefix reuse:
 
-These modules are more experimental than the core synthetic-data pipeline, but they show the repo is thinking about both model quality and serving efficiency.
+- With prefix cache: `49.5 samples/sec`
+- Without prefix cache: `19.89 samples/sec`
 
-## Scripts and Execution Modes
+That is roughly a **2.5x throughput improvement**, which validates the decision to include serving-oriented infrastructure instead of treating generation as a black box.
 
-The scripts folder exposes the repo in several different ways:
+### Ray Scaling Snapshot
 
-- `python main.py generate ...` for synthetic data generation
-- `python main.py train ...` for DPO training
-- `python main.py train-grpo ...` for GRPO training
-- `python main.py evaluate ...` for benchmark evaluation
-- `python main.py pipeline ...` for the full loop
-- `python main.py serve ...` for a vLLM-style serving path
+Also from `throughput_results.json`:
 
-More specialized scripts include:
+| Workers | Throughput | Speedup | Efficiency |
+|---|---:|---:|---:|
+| 1 | 5.00 | 1.00x | 100.0% |
+| 2 | 9.01 | 1.80x | 90.1% |
+| 4 | 16.25 | 3.25x | 81.2% |
 
-- `scripts/run_pipeline.py` for the full configurable workflow
-- `scripts/run_ray_pipeline.py` for an opinionated SGLang -> Ray -> GRPO demo
-- `scripts/eval_pass_at_k.py` for test-time compute scaling experiments
-- `scripts/eval_finetuned.py` for base-vs-finetuned comparisons and `outputs/training_improvement.json`
-- `scripts/eval_prm_vs_orm.py` for head-to-head PRM vs ORM reranking
-- `scripts/compare_training_methods.py` for method-level evaluation
-- `scripts/benchmark_throughput.py` for systems benchmarking
-- `scripts/visualize_training.py` for RL training-dynamics inspection
+This is the kind of scaling behavior I hoped to see: sublinear but still strong returns as verification and preprocessing are distributed.
 
-## Quick Start
+## What These Results Mean
 
-Install the base environment:
+Taken together, the recorded artifacts suggest three things:
+
+1. **Verified synthetic supervision is viable.**
+   The move from `35%` to `55%` pass@1 is large enough to be meaningful at the scale shown here.
+2. **Inference-time compute matters.**
+   The jump from pass@1 to pass@4 indicates that candidate generation plus selection is already a strong lever.
+3. **Systems choices materially affect experimentation velocity.**
+   Prefix caching and Ray-based parallelism change how practical the loop is to run.
+
+## Design Decisions
+
+### Why verifiable domains?
+
+Because verification gives objective labels. In domains like math and code, I can cheaply distinguish useful and non-useful reasoning traces at scale.
+
+### Why both training-time and inference-time methods?
+
+Because they answer different questions:
+
+- training improves the policy itself
+- inference-time compute improves selection over samples
+- reward models help bridge the two
+
+Keeping them in one codebase allows apples-to-apples comparisons.
+
+### Why include Ray, Kafka, and serving abstractions?
+
+Because realistic reasoning loops are pipeline problems, not only modeling problems. Once the number of samples per prompt increases, orchestration, batching, and checkpointing become first-order concerns.
+
+## How To Run
+
+### Installation
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
 ```
 
-If you want execution-based code verification, build the sandbox image first:
+Optional extras:
 
 ```bash
-docker build -t distributed-reasoning-loop-sandbox:latest -f docker/Dockerfile.sandbox .
+pip install -e .[inference]
+pip install -e .[distributed]
+pip install -e .[training]
+pip install -e .[dev]
 ```
 
-Generate synthetic reasoning data:
+### Main entrypoint
 
 ```bash
-python scripts/generate_synthetic_data.py \
-  --dataset gsm8k \
-  --subset-size 100 \
-  --num-paths 10 \
-  --backend sglang \
-  --output-dir ./outputs/synthetic_data
+python main.py --help
 ```
 
-Train with DPO:
+### Generate synthetic data
 
 ```bash
-python scripts/train_dpo.py \
-  --data-path ./outputs/synthetic_data/dpo_pairs.jsonl \
-  --output-dir ./outputs/dpo_model \
-  --model Qwen/Qwen2.5-1.5B-Instruct
+python main.py generate --dataset gsm8k --num-paths 10
 ```
 
-Train with GRPO:
+### Train with DPO
 
 ```bash
-python main.py train-grpo \
-  --data-path ./outputs/synthetic_data/dpo_pairs.jsonl \
-  --output-dir ./outputs/grpo_model \
-  --model Qwen/Qwen2.5-1.5B-Instruct
+python main.py train --data-path ./synthetic_data/dpo_pairs.jsonl
 ```
 
-Run the full pipeline:
+### Train with GRPO
 
 ```bash
-python scripts/run_pipeline.py \
-  --dataset gsm8k \
-  --subset-size 100 \
-  --training-method grpo
+python main.py train-grpo --data-path ./synthetic_data/full_pairs.jsonl --epochs 1
 ```
 
-Compare base and GRPO checkpoints on the same held-out problems:
+### Evaluate a model
 
 ```bash
-python scripts/eval_finetuned.py \
-  --base-model Qwen/Qwen2.5-1.5B-Instruct \
-  --finetuned-model ./outputs/grpo_model \
-  --output ./outputs/training_improvement.json
+python main.py evaluate --model ./grpo_output --benchmark gsm8k
 ```
 
-Compare PRM reranking against ORM reranking:
+### Run the full pipeline
 
 ```bash
-python scripts/eval_prm_vs_orm.py \
-  --model ./outputs/grpo_model \
-  --reward-model-path ./outputs/reward_model \
-  --process-reward-model-path ./outputs/process_reward_model
+python main.py pipeline --dataset gsm8k --subset-size 100
 ```
 
-Evaluate a model:
+### Launch serving
 
 ```bash
-python scripts/evaluate.py \
-  --model ./outputs/grpo_model \
-  --benchmark gsm8k \
-  --subset-size 50
+python main.py serve --model Qwen/Qwen2.5-7B-Instruct --port 8000
 ```
 
-Start local services when you want Kafka, Ray-adjacent development infrastructure, or the sandbox container:
+## Configuration
 
-```bash
-bash scripts/start_services.sh --prod
-```
+The default configuration lives in `config/default.yaml` and covers:
 
-## Bundled Artifacts In This Repository
+- generation models and sampling behavior
+- dataset selection
+- verifier type and sandbox limits
+- Ray and Kafka orchestration settings
+- DPO, GRPO, reward-model, and PRM settings
+- evaluation and reranking paths
+- W&B offline logging
 
-This repo already includes sample outputs from prior runs so the project can be inspected without executing the full pipeline immediately.
+This makes the project easy to repurpose as either:
 
-Current tracked examples include:
+- a local experimentation repo
+- a distributed research prototype
+- or a portfolio-quality example of end-to-end reasoning infrastructure
 
-- `data/stats.json`
-- `data/*.jsonl`
-- `comparison_results.json`
-- `pass_at_k_results.json`
-- `throughput_results.json`
-- `METRICS.md`
+## Safety and Verification Philosophy
 
-Those files should be treated as experiment snapshots and examples, not as a single canonical benchmark report.
+A key design principle in this repository is that reasoning quality should be judged by outcomes whenever possible. For code tasks, that means sandboxed execution rather than string matching. For math tasks, that means normalized symbolic or numeric equivalence rather than superficial formatting checks.
 
-## What Is Most Mature Today
+This matters because reasoning models are especially good at producing outputs that look persuasive while hiding mistakes. Verifiers help turn that ambiguity into measurable signals.
 
-The strongest, most integrated path in the codebase is:
+## Limitations
 
-- `gsm8k` or `math` problem loading,
-- multi-path generation,
-- math verification,
-- preprocessing and DPO pair construction,
-- DPO or GRPO training,
-- outcome reward modeling,
-- benchmark evaluation,
-- plus optional Ray-based parallel processing.
+This project is intentionally ambitious, and the current repository still has natural limitations:
 
-## What Is More Experimental
+- benchmark sizes in the included artifacts are modest
+- performance claims are strongest in verifiable domains, not open-ended reasoning
+- some orchestration modules are infrastructure scaffolding rather than a production deployment
+- reward models and PRMs depend on the quality of generated preference data
+- code verification assumes a working Docker-based sandbox environment
 
-Some parts of the repository are clearly research extensions rather than the default path:
+These limitations do not weaken the core contribution; they define the next set of experiments.
 
-- Kafka streaming abstractions
-- speculative decoding
-- MCTS and beam-search-style inference
-- throughput benchmarking utilities
+## Future Work
 
-The newer but still less battle-tested path is execution-verified code training, because it depends on a working local Docker runtime and sandbox image in addition to the Python stack.
+The most compelling next steps would be:
 
-The code is organized so those ideas can be tested without being mandatory for the main pipeline.
+1. Expand evaluation on larger held-out benchmark slices.
+2. Compare verifier-only reranking against learned reward reranking more systematically.
+3. Measure cost-quality tradeoffs across `transformers`, `vLLM`, and `SGLang`.
+4. Extend the loop to harder symbolic domains and tool-using tasks.
+5. Add richer observability around error modes, verifier disagreements, and reward calibration.
 
-## Current Caveats
+## Why This Project Matters
 
-There are a few areas where the codebase is broader than the fully integrated path:
+I built this repository to demonstrate more than model fine-tuning. It shows how I think about machine learning systems end to end:
 
-- `MBPP` loading exists, but the cleanest verified code path is still centered on `HumanEval`.
-- Kafka and distributed cache layers are available abstractions, but the simplest local loop does not depend on them.
-- Several inference and benchmarking utilities are designed for experimentation and may assume local services or heavyweight dependencies are already running.
-- The execution verifier requires the Docker CLI plus the sandbox image `distributed-reasoning-loop-sandbox:latest`.
-- W&B logging is optional and defaults cleanly to offline mode in the updated training flow.
+- define a concrete hypothesis
+- build the infrastructure needed to test it
+- create objective measurement paths
+- connect training and inference instead of treating them separately
+- and make the whole loop reproducible enough to iterate on
 
-## Why The Architecture Looks Like This
+For research engineering, that combination matters. Good ideas are only valuable when they can be operationalized, measured, and improved.
 
-I deliberately kept the repository modular because reasoning systems are hard to study when generation, verification, training, inference, and evaluation are entangled in one script.
+## Contact / Attribution
 
-This layout makes it easier to:
-
-- swap inference backends,
-- compare training methods,
-- test new verifiers,
-- benchmark systems optimizations,
-- and isolate where gains are actually coming from.
-
-In other words, the architecture is meant to support iteration, not hide complexity.
-
-## References
-
-- [DeepSeek-R1 / GRPO](https://arxiv.org/abs/2501.12948)
-- [SGLang](https://github.com/sgl-project/sglang)
-- [vLLM](https://github.com/vllm-project/vllm)
-- [Ray](https://www.ray.io/)
-- [GSM8K](https://arxiv.org/abs/2110.14168)
-- [HumanEval](https://github.com/openai/human-eval)
-- [MATH](https://arxiv.org/abs/2103.03874)
+This repository was created and authored by **Dev Desai** as a research-engineering project exploring scalable supervision for reasoning models.
