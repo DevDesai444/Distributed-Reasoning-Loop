@@ -54,6 +54,14 @@ def cmd_train_grpo(args):
     parser.add_argument('--model', type=str, default='Qwen/Qwen2.5-7B-Instruct')
     parser.add_argument('--epochs', type=int, default=1)
     parser.add_argument('--batch-size', type=int, default=2)
+    parser.add_argument('--group-size', type=int, default=8)
+    parser.add_argument('--online-max-new-tokens', type=int, default=256)
+    parser.add_argument('--online-temperature', type=float, default=0.8)
+    parser.add_argument('--online-top-p', type=float, default=0.95)
+    parser.add_argument('--online-resample-attempts', type=int, default=2)
+    parser.add_argument('--enable-ray-verification', action='store_true')
+    parser.add_argument('--disable-ray-verification', action='store_true')
+    parser.add_argument('--ray-verifier-workers', type=int, default=4)
     
     grpo_args = parser.parse_args(args.remaining)
     
@@ -63,6 +71,17 @@ def cmd_train_grpo(args):
         model_name=grpo_args.model,
         num_epochs=grpo_args.epochs,
         batch_size=grpo_args.batch_size,
+        group_size=grpo_args.group_size,
+        online_max_new_tokens=grpo_args.online_max_new_tokens,
+        online_temperature=grpo_args.online_temperature,
+        online_top_p=grpo_args.online_top_p,
+        online_resample_attempts=grpo_args.online_resample_attempts,
+        enable_ray_verification=(
+            False
+            if grpo_args.disable_ray_verification
+            else True
+        ),
+        ray_verifier_workers=grpo_args.ray_verifier_workers,
     )
 
 
