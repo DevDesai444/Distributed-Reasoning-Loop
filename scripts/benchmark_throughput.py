@@ -73,6 +73,7 @@ class ThroughputBenchmark:
         self.model_name = model_name
         self.num_samples = num_samples
         self.results: Dict[str, BenchmarkResult] = {}
+        self.prefix_cache_stats: Dict[str, Dict] = {}
     
     def benchmark_generation_throughput(
         self,
@@ -165,12 +166,33 @@ class ThroughputBenchmark:
         self,
         num_similar_prompts: int = 50,
     ) -> Dict[str, BenchmarkResult]:
-        """Benchmark prefix caching (RadixAttention) speedup."""
+        """
+        Benchmark prefix-caching speedup with the real SGLang engine.
+        Returns an empty dict if SGLang runtime is unavailable.
+        """
         logger.info("\n" + "=" * 60)
         logger.info("PREFIX CACHING BENCHMARK (RadixAttention)")
         logger.info("=" * 60)
         
         results = {}
+        self.prefix_cache_stats: Dict[str, Dict] = {}
+
+        try:
+            from inference.sglang_engine import SGLangEngine, SGLangConfig
+
+            engine = SGLangEngine(
+                SGLangConfig(
+                    model_name=self.model_name,
+                    temperature=0.7,
+                    max_tokens=256,
+                    enable_local_prefix_index=True,
+                    enable_cache_aware_scheduling=True,
+                )
+            )
+            engine.initialize()
+        except Exception as exc:
+            logger.warning("SGLang runtime unavailable; skipping real prefix-cache benchmark: %s", exc)
+            return results
         
         # Prompts with shared prefix
         shared_prefix = """You are a math expert. Solve the following problem step by step.
@@ -191,26 +213,34 @@ Problem: """
         
         for name, prompts in [("with_prefix_cache", prompts_similar), ("no_prefix_cache", prompts_diverse)]:
             logger.info(f"\n{name}:")
+            if hasattr(engine, "reset_prefix_cache_stats"):
+                engine.reset_prefix_cache_stats()
             
             latencies = []
+            outputs_count = 0
             start_time = time.time()
-            
-            for prompt in prompts:
+            batch_size = 8
+
+            for i in range(0, len(prompts), batch_size):
+                batch_prompts = prompts[i:i + batch_size]
                 t0 = time.time()
-                # Mock generation with different timing
-                if "prefix_cache" in name and name.startswith("with"):
-                    time.sleep(0.02)  # Faster with cache
-                else:
-                    time.sleep(0.05)  # Slower without
+                _ = engine.generate_batch(
+                    batch_prompts,
+                    problem_type="math",
+                    temperature=0.7,
+                    top_p=0.95,
+                    max_tokens=256,
+                )
                 latencies.append((time.time() - t0) * 1000)
+                outputs_count += len(batch_prompts)
             
             total_time = time.time() - start_time
             
             results[name] = BenchmarkResult(
                 name=name,
-                samples_processed=len(prompts),
+                samples_processed=outputs_count,
                 total_time_seconds=round(total_time, 2),
-                throughput_samples_per_sec=round(len(prompts) / total_time, 2),
+                throughput_samples_per_sec=round(outputs_count / total_time, 2),
                 avg_latency_ms=round(statistics.mean(latencies), 2),
                 p50_latency_ms=round(statistics.median(latencies), 2),
                 p95_latency_ms=round(sorted(latencies)[int(len(latencies) * 0.95)], 2),
@@ -218,6 +248,13 @@ Problem: """
             )
             
             logger.info(f"  Throughput: {results[name].throughput_samples_per_sec:.2f} samples/sec")
+            self.prefix_cache_stats[name] = engine.get_prefix_cache_stats()
+            logger.info(
+                "  Local prefix hit rate: %.3f (%s/%s)",
+                self.prefix_cache_stats[name].get("local_hit_rate", 0.0),
+                self.prefix_cache_stats[name].get("hits", 0),
+                self.prefix_cache_stats[name].get("queries", 0),
+            )
         
         # Calculate speedup
         if "with_prefix_cache" in results and "no_prefix_cache" in results:
@@ -644,6 +681,8 @@ Problem: """
         all_results["benchmarks"]["prefix_caching"] = {
             k: v.to_dict() for k, v in cache_results.items()
         }
+        if self.prefix_cache_stats:
+            all_results["benchmarks"]["prefix_caching_index_stats"] = self.prefix_cache_stats
         
         # Ray scaling (now uses real DistributedDataProcessor)
         scaling_results = self.benchmark_ray_scaling(worker_counts)
