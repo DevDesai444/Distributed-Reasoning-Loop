@@ -22,6 +22,68 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def stream_pipeline_data_to_kafka(config, samples, pairs):
+    """Optionally stream pipeline artifacts to Kafka topics."""
+    kafka_cfg = config.orchestration.kafka
+    if not bool(kafka_cfg.get("enabled", False)):
+        logger.info("Kafka streaming disabled; skipping orchestration stream publish.")
+        return
+
+    try:
+        from orchestration.kafka_streaming import KafkaConfig, KafkaAdminClient, ReasoningDataProducer
+    except Exception as exc:
+        logger.warning("Kafka modules unavailable; skipping stream publish: %s", exc)
+        return
+
+    try:
+        topic_cfg = kafka_cfg.topics
+        producer_cfg = KafkaConfig(
+            bootstrap_servers=list(kafka_cfg.bootstrap_servers),
+            raw_reasoning_topic=str(topic_cfg.raw_reasoning_data),
+            verified_paths_topic=str(topic_cfg.verified_paths),
+            training_data_topic=str(topic_cfg.training_data),
+        )
+        admin = KafkaAdminClient(producer_cfg)
+        admin.setup_pipeline_topics()
+        producer = ReasoningDataProducer(producer_cfg)
+    except Exception as exc:
+        logger.warning("Failed to initialize Kafka producer; skipping stream publish: %s", exc)
+        return
+
+    try:
+        for sample in samples:
+            sample_dict = sample.to_dict() if hasattr(sample, "to_dict") else sample
+            producer.send_raw_reasoning(
+                {
+                    "problem_id": sample_dict.get("problem_id"),
+                    "problem": sample_dict.get("problem"),
+                    "reasoning": sample_dict.get("reasoning"),
+                    "path_hash": sample_dict.get("path_hash"),
+                }
+            )
+            producer.send_verified_path(sample_dict)
+
+        for pair in pairs:
+            pair_dict = pair.to_dict() if hasattr(pair, "to_dict") else pair
+            producer.send_training_sample(
+                {
+                    "problem_id": pair_dict.get("problem_id"),
+                    "prompt": pair_dict.get("problem", ""),
+                    "chosen": pair_dict.get("chosen", ""),
+                    "rejected": pair_dict.get("rejected", ""),
+                }
+            )
+        logger.info(
+            "Published pipeline artifacts to Kafka: %s samples, %s training pairs",
+            len(samples),
+            len(pairs),
+        )
+    except Exception as exc:
+        logger.warning("Kafka publish failed mid-stream: %s", exc)
+    finally:
+        producer.close()
+
+
 def run_data_generation(config, args):
     """Run synthetic data generation phase."""
     from data_generator import SyntheticDataPipeline, GenerationConfig
@@ -49,6 +111,7 @@ def run_data_generation(config, args):
         subset_size=args.subset_size,
         batch_size=args.batch_size,
     )
+    stream_pipeline_data_to_kafka(config, samples, pairs)
     
     logger.info(f"Generated {len(samples)} samples, {len(pairs)} DPO pairs")
     return samples, pairs
