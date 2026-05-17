@@ -7,7 +7,7 @@ import re
 import sympy
 from sympy import simplify, sympify, Eq, solve, N
 from sympy.parsing.sympy_parser import parse_expr, standard_transformations, implicit_multiplication_application
-from typing import Tuple, Optional, Any
+from typing import Tuple, Optional, Any, Dict
 import logging
 from dataclasses import dataclass
 from enum import Enum
@@ -76,6 +76,25 @@ class MathVerifier:
                 return answer
         
         return None
+
+    def _coerce_to_answer(self, text: str) -> str:
+        """
+        Use answer extraction for reasoning traces, but keep direct answer strings intact.
+        """
+        extracted = self.extract_final_answer(text)
+        if extracted is None:
+            return text
+
+        lowered = text.lower()
+        reasoning_markers = ("####", "\\boxed", "answer is", "therefore", "\n")
+        if any(marker in lowered for marker in reasoning_markers):
+            return extracted
+
+        # If extraction would discard significant structure from a short direct answer,
+        # preserve the original text.
+        if len(text) <= len(extracted) + 8:
+            return text
+        return extracted
     
     def normalize_answer(self, answer: str) -> str:
         """Normalize an answer string for comparison."""
@@ -172,6 +191,73 @@ class MathVerifier:
             return is_equal, 1.0 if is_equal else 0.0
         except Exception:
             return False, 0.0
+
+    def parse_variable_assignments(self, value: str) -> Optional[Dict[str, Any]]:
+        """Parse answers like 'x=2, y=-3' into a variable->value mapping."""
+        normalized = self.normalize_answer(value).strip()
+        normalized = normalized.strip("()[]{}")
+        if "=" not in normalized:
+            return None
+
+        assignments: Dict[str, Any] = {}
+        parts = [part.strip() for part in re.split(r"[,\n;]+", normalized) if part.strip()]
+        if not parts:
+            return None
+
+        for part in parts:
+            if "=" not in part:
+                return None
+            lhs, rhs = part.split("=", 1)
+            var_name = lhs.strip()
+            value_str = rhs.strip()
+
+            if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", var_name):
+                return None
+
+            numeric_value = self.parse_numeric(value_str)
+            if numeric_value is not None:
+                assignments[var_name] = numeric_value
+                continue
+
+            symbolic_value = self.parse_symbolic(value_str)
+            if symbolic_value is None:
+                return None
+            assignments[var_name] = symbolic_value
+
+        return assignments or None
+
+    def compare_variable_assignments(self, pred: str, expected: str) -> Tuple[bool, float]:
+        """Compare multi-variable assignment answers."""
+        pred_assignments = self.parse_variable_assignments(pred)
+        exp_assignments = self.parse_variable_assignments(expected)
+
+        if pred_assignments is None or exp_assignments is None:
+            return False, 0.0
+
+        if set(pred_assignments.keys()) != set(exp_assignments.keys()):
+            return False, 0.0
+
+        for var_name, exp_value in exp_assignments.items():
+            pred_value = pred_assignments[var_name]
+
+            if isinstance(pred_value, (int, float)) and isinstance(exp_value, (int, float)):
+                if exp_value == 0:
+                    if abs(pred_value) >= self.tolerance:
+                        return False, 0.0
+                else:
+                    rel_err = abs(pred_value - exp_value) / abs(exp_value)
+                    if rel_err >= self.tolerance:
+                        return False, 0.0
+                continue
+
+            try:
+                diff = simplify(pred_value - exp_value)
+                if diff != 0:
+                    return False, 0.0
+            except Exception:
+                return False, 0.0
+
+        return True, 1.0
     
     def verify(self, predicted: str, expected: str) -> VerificationResult:
         """
@@ -179,8 +265,8 @@ class MathVerifier:
         Tries multiple comparison strategies.
         """
         # Extract final answers if full reasoning paths provided
-        pred_answer = self.extract_final_answer(predicted) or predicted
-        exp_answer = self.extract_final_answer(expected) or expected
+        pred_answer = self._coerce_to_answer(predicted)
+        exp_answer = self._coerce_to_answer(expected)
         
         # Normalize both answers
         pred_norm = self.normalize_answer(pred_answer)
@@ -193,6 +279,16 @@ class MathVerifier:
                 expected=exp_norm,
                 predicted=pred_norm,
                 confidence=1.0
+            )
+
+        # Multi-variable assignment comparison
+        is_equal, confidence = self.compare_variable_assignments(pred_norm, exp_norm)
+        if is_equal:
+            return VerificationResult(
+                status=VerificationStatus.CORRECT,
+                expected=exp_norm,
+                predicted=pred_norm,
+                confidence=confidence,
             )
         
         # Numeric comparison
