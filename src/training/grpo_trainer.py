@@ -7,21 +7,85 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
+import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset
+
+# Ensure sibling src modules are importable when this file runs as a script.
+_SRC_ROOT = Path(__file__).resolve().parents[1]
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
 
 from verifier import create_verifier, get_default_sandbox_image
 from wandb_utils import ensure_wandb_run, log_to_wandb
 
-from .runtime_utils import build_causal_lm_load_kwargs, get_runtime_device
+try:
+    from .runtime_utils import build_causal_lm_load_kwargs, get_runtime_device
+except ImportError:
+    from training.runtime_utils import build_causal_lm_load_kwargs, get_runtime_device
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_requested_num_gpus(value: str, available: int) -> int:
+    """Resolve requested GPU count from a user value and available hardware."""
+    normalized = str(value).strip().lower()
+    if normalized in {"auto", "all"}:
+        return max(1, available)
+
+    try:
+        requested = int(normalized)
+    except ValueError as exc:
+        raise ValueError(f"Invalid --num-gpus value: {value}") from exc
+
+    if requested < 1:
+        raise ValueError("--num-gpus must be >= 1")
+    return min(requested, max(1, available))
+
+
+def maybe_launch_grpo_distributed(training_args: List[str], requested_num_gpus: str = "auto") -> bool:
+    """
+    Launch GRPO training via torch.distributed.run when multiple GPUs are available.
+
+    Returns True if this process launched a distributed child and should exit.
+    """
+    if os.environ.get("LOCAL_RANK") is not None or os.environ.get("RANK") is not None:
+        return False
+
+    available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    target_gpus = _parse_requested_num_gpus(requested_num_gpus, available_gpus)
+    if target_gpus <= 1:
+        logger.info(
+            "Distributed launch not required (requested=%s, available=%s). Running single-process GRPO.",
+            requested_num_gpus,
+            available_gpus,
+        )
+        return False
+
+    script_path = Path(__file__).resolve()
+    cmd = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        "--standalone",
+        "--nproc_per_node",
+        str(target_gpus),
+        str(script_path),
+        *training_args,
+    ]
+    logger.info("Launching distributed GRPO across %s GPUs", target_gpus)
+    subprocess.run(cmd, check=True)
+    return True
 
 
 class RayMathVerificationPool:
@@ -50,7 +114,12 @@ class RayMathVerificationPool:
 
             self._ray = ray
             if not ray.is_initialized():
-                ray.init(ignore_reinit_error=True, include_dashboard=False, log_to_driver=False)
+                ray.init(
+                    ignore_reinit_error=True,
+                    include_dashboard=False,
+                    log_to_driver=False,
+                    namespace="grpo_verification",
+                )
 
             @ray.remote
             class _MathVerifierWorker:
@@ -265,6 +334,38 @@ class ReasoningGRPOTrainer:
         self.verifier = None
         self.verification_pool: Optional[RayMathVerificationPool] = None
         self._heldout_problems: Optional[List[Dict[str, str]]] = None
+        self.rank = int(os.environ.get("RANK", "0"))
+        self.local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        self.distributed = self.world_size > 1
+
+    def _is_main_process(self) -> bool:
+        return self.rank == 0
+
+    def _unwrap_model(self):
+        return self.model.module if isinstance(self.model, DDP) else self.model
+
+    def _setup_distributed(self):
+        if not self.distributed:
+            return
+
+        if torch.cuda.is_available():
+            torch.cuda.set_device(self.local_rank)
+            self.device = torch.device(f"cuda:{self.local_rank}")
+            backend = "nccl"
+        else:
+            self.device = torch.device("cpu")
+            backend = "gloo"
+
+        if not dist.is_initialized():
+            dist.init_process_group(backend=backend)
+        logger.info(
+            "Initialized distributed GRPO rank=%s local_rank=%s world_size=%s backend=%s",
+            self.rank,
+            self.local_rank,
+            self.world_size,
+            backend,
+        )
 
     def _setup_verifier(self):
         verifier_kwargs: dict[str, Any] = {}
@@ -276,8 +377,9 @@ class ReasoningGRPOTrainer:
             }
         self.verifier = create_verifier(self.config.verifier_type, **verifier_kwargs)
         if self.config.verifier_type == "math" and self.config.enable_ray_verification:
+            per_rank_workers = max(1, self.config.ray_verifier_workers // max(self.world_size, 1))
             self.verification_pool = RayMathVerificationPool(
-                num_workers=self.config.ray_verifier_workers
+                num_workers=per_rank_workers
             )
 
     def _build_sequence_encodings(self, prompt: str, responses: List[str], device: torch.device):
@@ -357,7 +459,8 @@ class ReasoningGRPOTrainer:
             truncation=True,
             max_length=self.config.max_prompt_length,
         )
-        device = next(self.model.parameters()).device
+        policy_model = self._unwrap_model()
+        device = next(policy_model.parameters()).device
         inputs = {key: value.to(device) for key, value in inputs.items()}
 
         input_ids = inputs["input_ids"].repeat(self.config.group_size, 1)
@@ -367,7 +470,7 @@ class ReasoningGRPOTrainer:
         was_training = self.model.training
         self.model.eval()
         with torch.no_grad():
-            outputs = self.model.generate(
+            outputs = policy_model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=self.config.online_max_new_tokens,
@@ -394,6 +497,7 @@ class ReasoningGRPOTrainer:
         """Load tokenizer, policy model, reference model, and verifier."""
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        self._setup_distributed()
         self._setup_verifier()
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.config.model_name,
@@ -406,11 +510,17 @@ class ReasoningGRPOTrainer:
             prefer_bf16=self.config.bf16,
             allow_8bit=self.config.use_lora,
         )
+        if self.distributed and torch.cuda.is_available():
+            model_kwargs.pop("device_map", None)
+            model_kwargs["device_map"] = {"": self.local_rank}
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
             **model_kwargs,
         )
-        if not torch.cuda.is_available():
+        if torch.cuda.is_available():
+            if self.distributed:
+                self.model.to(self.device)
+        else:
             self.model.to(self.device)
 
         if self.config.use_lora:
@@ -426,17 +536,37 @@ class ReasoningGRPOTrainer:
             prefer_bf16=self.config.bf16,
             allow_8bit=True,
         )
+        if self.distributed and torch.cuda.is_available():
+            ref_model_kwargs.pop("device_map", None)
+            ref_model_kwargs["device_map"] = {"": self.local_rank}
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
             **ref_model_kwargs,
         )
-        if not torch.cuda.is_available():
+        if torch.cuda.is_available():
+            if self.distributed:
+                self.ref_model.to(self.device)
+        else:
             self.ref_model.to(self.device)
         self.ref_model.eval()
 
+        if self.distributed:
+            self.model = DDP(
+                self.model,
+                device_ids=[self.local_rank] if torch.cuda.is_available() else None,
+                output_device=self.local_rank if torch.cuda.is_available() else None,
+                find_unused_parameters=False,
+            )
+
         trainable_params = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
         self.optimizer = torch.optim.AdamW(trainable_params, lr=self.config.learning_rate)
-        logger.info("Loaded GRPO trainer components for %s", self.config.model_name)
+        if self._is_main_process():
+            logger.info(
+                "Loaded GRPO trainer components for %s (distributed=%s, world_size=%s)",
+                self.config.model_name,
+                self.distributed,
+                self.world_size,
+            )
 
     def _apply_lora(self):
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -641,11 +771,12 @@ class ReasoningGRPOTrainer:
             max_length=self.config.max_prompt_length,
         )
 
-        device = next(self.model.parameters()).device
+        policy_model = self._unwrap_model()
+        device = next(policy_model.parameters()).device
         inputs = {key: value.to(device) for key, value in inputs.items()}
 
         with torch.no_grad():
-            outputs = self.model.generate(
+            outputs = policy_model.generate(
                 **inputs,
                 max_new_tokens=self.config.eval_max_new_tokens,
                 do_sample=False,
@@ -661,6 +792,8 @@ class ReasoningGRPOTrainer:
         """
         if self.config.verifier_type != "math":
             logger.info("Skipping held-out checkpoint eval because verifier_type=%s", self.config.verifier_type)
+            return None
+        if self.distributed and not self._is_main_process():
             return None
 
         problems = self._load_heldout_problems()
@@ -707,19 +840,40 @@ class ReasoningGRPOTrainer:
             logger.warning("No GRPO groups available for training.")
             return
 
-        total_optimizer_steps = self._build_scheduler(len(dataset))
-        ensure_wandb_run(
-            project=self.config.wandb_project,
-            name="grpo-training",
-            mode=self.config.wandb_mode,
-            config={
-                **asdict(self.config),
-                "dataset_size": len(dataset),
-                "reward_type": self.config.verifier_type,
-                "training_steps": total_optimizer_steps,
-            },
-            tags=["grpo", self.config.verifier_type],
-        )
+        all_batch_starts = list(range(0, len(dataset), self.config.batch_size))
+        if self.distributed:
+            usable_batches = (len(all_batch_starts) // self.world_size) * self.world_size
+            all_batch_starts = all_batch_starts[:usable_batches]
+            if not all_batch_starts:
+                if self._is_main_process():
+                    logger.warning(
+                        "Dataset too small for distributed run (groups=%s, batch_size=%s, world_size=%s).",
+                        len(dataset),
+                        self.config.batch_size,
+                        self.world_size,
+                    )
+                return
+            local_batch_starts = all_batch_starts[self.rank::self.world_size]
+        else:
+            local_batch_starts = all_batch_starts
+
+        local_effective_dataset_size = max(1, len(local_batch_starts) * self.config.batch_size)
+        total_optimizer_steps = self._build_scheduler(local_effective_dataset_size)
+        if self._is_main_process():
+            ensure_wandb_run(
+                project=self.config.wandb_project,
+                name="grpo-training",
+                mode=self.config.wandb_mode,
+                config={
+                    **asdict(self.config),
+                    "dataset_size": len(dataset),
+                    "reward_type": self.config.verifier_type,
+                    "training_steps": total_optimizer_steps,
+                    "distributed": self.distributed,
+                    "world_size": self.world_size,
+                },
+                tags=["grpo", self.config.verifier_type],
+            )
 
         self.model.train()
         self.optimizer.zero_grad()
@@ -727,18 +881,24 @@ class ReasoningGRPOTrainer:
         total_loss = 0.0
 
         log_dir = Path(self.config.output_dir) / "training_logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
+        if self._is_main_process():
+            log_dir.mkdir(parents=True, exist_ok=True)
         metrics_file = log_dir / "training_metrics.jsonl"
 
         from tqdm import tqdm
 
         for epoch in range(self.config.num_epochs):
-            logger.info("GRPO epoch %s/%s", epoch + 1, self.config.num_epochs)
+            if self._is_main_process():
+                logger.info("GRPO epoch %s/%s", epoch + 1, self.config.num_epochs)
             epoch_loss = 0.0
-            progress = tqdm(range(0, len(dataset), self.config.batch_size), desc=f"Epoch {epoch + 1}")
+            progress = tqdm(
+                local_batch_starts,
+                desc=f"Epoch {epoch + 1}",
+                disable=not self._is_main_process(),
+            )
             micro_batches_since_update = 0
 
-            for batch_idx in progress:
+            for local_batch_index, batch_idx in enumerate(progress):
                 batch_wall_start = time.perf_counter()
                 accumulated_loss = 0.0
                 batch_metrics = {
@@ -852,10 +1012,11 @@ class ReasoningGRPOTrainer:
                         batch_metrics[key] += value
 
                 epoch_loss += accumulated_loss
-                progress.set_postfix({"loss": f"{accumulated_loss / max(items_in_batch, 1):.4f}"})
+                if self._is_main_process():
+                    progress.set_postfix({"loss": f"{accumulated_loss / max(items_in_batch, 1):.4f}"})
                 micro_batches_since_update += 1
 
-                is_last_batch = batch_idx + items_in_batch >= len(dataset)
+                is_last_batch = local_batch_index + 1 >= len(local_batch_starts)
                 if micro_batches_since_update < self.config.gradient_accumulation_steps and not is_last_batch:
                     total_loss += accumulated_loss
                     continue
@@ -910,64 +1071,75 @@ class ReasoningGRPOTrainer:
                     "resample_time_ms": resample_time_s * 1000.0,
                 }
 
-                with open(metrics_file, "a") as handle:
-                    handle.write(json.dumps(log_entry) + "\n")
+                if self._is_main_process():
+                    with open(metrics_file, "a") as handle:
+                        handle.write(json.dumps(log_entry) + "\n")
 
-                log_to_wandb(
-                    {
-                        "train/loss": log_entry["loss"],
-                        "train/policy_loss": log_entry["policy_loss"],
-                        "train/kl_divergence": avg_kl,
-                        "train/gradient_norm": float(grad_norm),
-                        "train/ratio_mean": log_entry["ratio_mean"],
-                        "train/learning_rate": current_lr,
-                        "train/mean_reward": mean_reward,
-                        "train/reward_std": reward_std,
-                        "perf/rollout_time_ms": rollout_time_ms,
-                        "perf/verify_wait_time_ms": verify_wait_time_ms,
-                        "perf/gpu_idle_estimate_ms": gpu_idle_estimate_ms,
-                        "perf/batch_wall_time_ms": batch_wall_time_ms,
-                        "perf/overlap_efficiency": overlap_efficiency,
-                        "perf/resample_time_ms": resample_time_s * 1000.0,
-                    },
-                    step=global_step,
-                )
-                if self.verification_pool is not None:
-                    verify_stats = self.verification_pool.get_stats()
                     log_to_wandb(
                         {
-                            "verify/submitted": verify_stats.get("submitted", 0),
-                            "verify/completed": verify_stats.get("completed", 0),
-                            "verify/failed": verify_stats.get("failed", 0),
+                            "train/loss": log_entry["loss"],
+                            "train/policy_loss": log_entry["policy_loss"],
+                            "train/kl_divergence": avg_kl,
+                            "train/gradient_norm": float(grad_norm),
+                            "train/ratio_mean": log_entry["ratio_mean"],
+                            "train/learning_rate": current_lr,
+                            "train/mean_reward": mean_reward,
+                            "train/reward_std": reward_std,
+                            "perf/rollout_time_ms": rollout_time_ms,
+                            "perf/verify_wait_time_ms": verify_wait_time_ms,
+                            "perf/gpu_idle_estimate_ms": gpu_idle_estimate_ms,
+                            "perf/batch_wall_time_ms": batch_wall_time_ms,
+                            "perf/overlap_efficiency": overlap_efficiency,
+                            "perf/resample_time_ms": resample_time_s * 1000.0,
                         },
                         step=global_step,
                     )
+                    if self.verification_pool is not None:
+                        verify_stats = self.verification_pool.get_stats()
+                        log_to_wandb(
+                            {
+                                "verify/submitted": verify_stats.get("submitted", 0),
+                                "verify/completed": verify_stats.get("completed", 0),
+                                "verify/failed": verify_stats.get("failed", 0),
+                            },
+                            step=global_step,
+                        )
 
-                if self.config.eval_interval_steps > 0 and global_step % self.config.eval_interval_steps == 0:
+                if (
+                    self._is_main_process()
+                    and self.config.eval_interval_steps > 0
+                    and global_step % self.config.eval_interval_steps == 0
+                ):
                     self.evaluate_checkpoint(global_step)
 
                 total_loss += accumulated_loss
 
-            logger.info(
-                "Epoch %s complete. Average loss: %.4f",
-                epoch + 1,
-                epoch_loss / max(len(dataset), 1),
-            )
+            if self._is_main_process():
+                logger.info(
+                    "Epoch %s complete. Average loss: %.4f",
+                    epoch + 1,
+                    epoch_loss / max(len(local_batch_starts), 1),
+                )
 
-        self.save()
-        avg_loss = total_loss / max(len(dataset), 1)
-        logger.info("GRPO training complete. Average loss: %.4f", avg_loss)
+        if self._is_main_process():
+            self.save()
+            avg_loss = total_loss / max(len(local_batch_starts), 1)
+            logger.info("GRPO training complete. Average loss: %.4f", avg_loss)
+
+        if self.distributed and dist.is_initialized():
+            dist.barrier()
 
     def save(self, path: Optional[str] = None):
         save_path = Path(path or self.config.output_dir)
         save_path.mkdir(parents=True, exist_ok=True)
+        model_to_save = self._unwrap_model()
 
-        if self.config.use_lora and hasattr(self.model, "merge_and_unload"):
+        if self.config.use_lora and hasattr(model_to_save, "merge_and_unload"):
             logger.info("Merging LoRA adapters before save")
-            merged_model = self.model.merge_and_unload()
+            merged_model = model_to_save.merge_and_unload()
             merged_model.save_pretrained(save_path)
         else:
-            self.model.save_pretrained(save_path)
+            model_to_save.save_pretrained(save_path)
 
         self.tokenizer.save_pretrained(save_path)
         logger.info("Saved GRPO model to %s", save_path)
@@ -1032,7 +1204,35 @@ if __name__ == "__main__":
     parser.add_argument("--disable-ray-verification", action="store_true")
     parser.add_argument("--ray-verifier-workers", type=int, default=4)
     parser.add_argument("--verifier-type", type=str, default="math", choices=["math", "code"])
+    parser.add_argument(
+        "--num-gpus",
+        type=str,
+        default="auto",
+        help="Number of GPUs to use: auto|all|1|2|3|...",
+    )
     args = parser.parse_args()
+
+    original_args = sys.argv[1:]
+    forwarded_args: List[str] = []
+    skip_next = False
+    for idx, token in enumerate(original_args):
+        if skip_next:
+            skip_next = False
+            continue
+
+        if token == "--num-gpus":
+            next_token = original_args[idx + 1] if idx + 1 < len(original_args) else None
+            if next_token and not next_token.startswith("--"):
+                skip_next = True
+            continue
+
+        if token.startswith("--num-gpus="):
+            continue
+
+        forwarded_args.append(token)
+
+    if maybe_launch_grpo_distributed(forwarded_args, requested_num_gpus=args.num_gpus):
+        sys.exit(0)
 
     train_grpo_from_synthetic_data(
         data_path=args.data_path,
