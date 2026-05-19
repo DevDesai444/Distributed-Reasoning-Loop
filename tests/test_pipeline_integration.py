@@ -53,6 +53,9 @@ def test_pipeline_generate_train_eval_end_to_end(monkeypatch, tmp_path):
         num_paths: int
         max_new_tokens: int
         temperature: float
+        top_p: float = 0.95
+        tensor_parallel_size: int = 1
+        gpu_memory_utilization: float = 0.9
 
     class FakeSample:
         def __init__(self, idx: int):
@@ -211,9 +214,13 @@ def test_pipeline_generate_train_eval_end_to_end(monkeypatch, tmp_path):
             "data_generator": {
                 "teacher_model": "teacher",
                 "student_model": "student",
+                "backend": "vllm",
+                "tensor_parallel_size": "auto",
+                "gpu_memory_utilization": 0.9,
                 "num_cot_paths": 2,
                 "max_new_tokens": 32,
                 "temperature": 0.7,
+                "top_p": 0.95,
             },
             "verifier": {
                 "type": "math",
