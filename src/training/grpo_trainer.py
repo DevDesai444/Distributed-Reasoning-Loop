@@ -1192,8 +1192,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a model with GRPO from synthetic data")
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--output-dir", type=str, default="./grpo_output")
-    parser.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-7B-Instruct")
-    parser.add_argument("--num-epochs", type=int, default=1)
+    parser.add_argument(
+        "--model-name",
+        "--model",
+        dest="model_name",
+        type=str,
+        default="Qwen/Qwen2.5-7B-Instruct",
+    )
+    parser.add_argument(
+        "--num-epochs",
+        "--epochs",
+        dest="num_epochs",
+        type=int,
+        default=1,
+    )
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--group-size", type=int, default=8)
     parser.add_argument("--online-max-new-tokens", type=int, default=256)
