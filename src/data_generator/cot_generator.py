@@ -15,6 +15,24 @@ import asyncio
 logger = logging.getLogger(__name__)
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str) -> Optional[int]:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("Ignoring invalid integer environment variable %s=%r", name, value)
+        return None
+
+
 class InferenceBackend(Enum):
     VLLM = "vllm"
     SGLANG = "sglang"
@@ -40,6 +58,9 @@ class GenerationConfig:
     # vLLM specific
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.9
+    vllm_enforce_eager: bool = False
+    vllm_max_model_len: Optional[int] = None
+    vllm_disable_custom_all_reduce: bool = False
     
     # SGLang specific
     enable_radix_cache: bool = True
@@ -99,12 +120,29 @@ Explain your approach, then provide the complete solution in a Python code block
         """Initialize vLLM backend."""
         try:
             from vllm import LLM, SamplingParams
-            
+
+            llm_kwargs = {
+                "model": self.config.model_name,
+                "tensor_parallel_size": self.config.tensor_parallel_size,
+                "gpu_memory_utilization": self.config.gpu_memory_utilization,
+                "trust_remote_code": True,
+            }
+
+            max_model_len = self.config.vllm_max_model_len or _env_int("DRL_VLLM_MAX_MODEL_LEN")
+            if max_model_len:
+                llm_kwargs["max_model_len"] = max_model_len
+
+            if self.config.vllm_enforce_eager or _env_flag("DRL_VLLM_ENFORCE_EAGER"):
+                llm_kwargs["enforce_eager"] = True
+
+            if (
+                self.config.vllm_disable_custom_all_reduce
+                or _env_flag("DRL_VLLM_DISABLE_CUSTOM_ALL_REDUCE")
+            ):
+                llm_kwargs["disable_custom_all_reduce"] = True
+
             self.model = LLM(
-                model=self.config.model_name,
-                tensor_parallel_size=self.config.tensor_parallel_size,
-                gpu_memory_utilization=self.config.gpu_memory_utilization,
-                trust_remote_code=True,
+                **llm_kwargs,
             )
             self.sampling_params = SamplingParams(
                 max_tokens=self.config.max_new_tokens,
@@ -114,7 +152,13 @@ Explain your approach, then provide the complete solution in a Python code block
                 repetition_penalty=self.config.repetition_penalty,
             )
             self._initialized = True
-            logger.info(f"Initialized vLLM with model {self.config.model_name}")
+            logger.info(
+                "Initialized vLLM with model %s (tp=%s, eager=%s, max_model_len=%s)",
+                self.config.model_name,
+                self.config.tensor_parallel_size,
+                bool(llm_kwargs.get("enforce_eager", False)),
+                llm_kwargs.get("max_model_len"),
+            )
         except ImportError:
             raise ImportError("vLLM not installed. Install with: pip install vllm")
     
