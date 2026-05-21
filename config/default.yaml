@@ -53,10 +53,18 @@ training:
     max_prompt_length: 512
 
   grpo:
+    group_size: 8
     kl_threshold: 0.1
     eval_interval_steps: 50
     heldout_eval_size: 20
     eval_max_new_tokens: 256
+    online_max_new_tokens: 256
+    online_temperature: 0.8
+    online_top_p: 0.95
+    online_resample_attempts: 2
+    online_min_reward_std: 1e-6
+    enable_ray_verification: true
+    ray_verifier_workers: 4
 
   reward_model:
     model_name: "Qwen/Qwen2.5-0.5B-Instruct"
