@@ -54,6 +54,26 @@ class TestMathVerifier:
         normalized = self.verifier.normalize_answer("$100")
         assert normalized == "100"
 
+    def test_negative_numeric_equivalence(self):
+        """Test negative numeric values."""
+        result = self.verifier.verify("-3", "-3.0")
+        assert result.status == VerificationStatus.CORRECT
+
+    def test_scientific_notation_equivalence(self):
+        """Test scientific notation comparisons."""
+        result = self.verifier.verify("1e-3", "0.001")
+        assert result.status == VerificationStatus.CORRECT
+
+    def test_multivariable_assignment_equivalence(self):
+        """Test variable assignment answers with different ordering."""
+        result = self.verifier.verify("y=-3, x=2", "x=2, y=-3")
+        assert result.status == VerificationStatus.CORRECT
+
+    def test_multivariable_symbolic_equivalence(self):
+        """Test symbolic right-hand sides in variable assignments."""
+        result = self.verifier.verify("x=2*t, y=t+t", "x=t+t, y=2*t")
+        assert result.status == VerificationStatus.CORRECT
+
 
 class TestGSM8KVerifier:
     """Tests for GSM8KVerifier."""
