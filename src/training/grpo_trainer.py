@@ -39,6 +39,19 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _resolve_distributed_timeout(timeout_minutes: int) -> timedelta:
+    """
+    Map user-facing timeout semantics to a concrete process-group timeout.
+
+    PyTorch/NCCL expects a timeout value for collectives. We treat non-positive
+    values as "no practical timeout" and map them to a very large timeout
+    instead of inheriting NCCL's default 10-minute watchdog.
+    """
+    if timeout_minutes <= 0:
+        return timedelta(days=365)
+    return timedelta(minutes=timeout_minutes)
+
+
 def _parse_requested_num_gpus(value: str, available: int) -> int:
     """Resolve requested GPU count from a user value and available hardware."""
     normalized = str(value).strip().lower()
@@ -241,7 +254,7 @@ class GRPOConfig:
 
     bf16: bool = True
     gradient_checkpointing: bool = True
-    distributed_timeout_minutes: int = 120
+    distributed_timeout_minutes: int = 0
 
     verifier_type: str = "math"
     verifier_timeout: int = 10
@@ -371,18 +384,20 @@ class ReasoningGRPOTrainer:
             self.device = torch.device("cpu")
             backend = "gloo"
 
+        effective_timeout = _resolve_distributed_timeout(self.config.distributed_timeout_minutes)
         if not dist.is_initialized():
             dist.init_process_group(
                 backend=backend,
-                timeout=timedelta(minutes=max(1, self.config.distributed_timeout_minutes)),
+                timeout=effective_timeout,
             )
         logger.info(
-            "Initialized distributed GRPO rank=%s local_rank=%s world_size=%s backend=%s timeout_minutes=%s",
+            "Initialized distributed GRPO rank=%s local_rank=%s world_size=%s backend=%s timeout_minutes=%s effective_timeout=%s",
             self.rank,
             self.local_rank,
             self.world_size,
             backend,
             self.config.distributed_timeout_minutes,
+            effective_timeout,
         )
 
     def _setup_verifier(self):
@@ -1197,7 +1212,7 @@ def train_grpo_from_synthetic_data(
     enable_ray_verification: bool = True,
     ray_verifier_workers: int = 4,
     verifier_type: str = "math",
-    distributed_timeout_minutes: int = 120,
+    distributed_timeout_minutes: int = 0,
 ):
     """Convenience entry point for GRPO training from a JSONL file."""
     data = []
@@ -1256,7 +1271,12 @@ if __name__ == "__main__":
     parser.add_argument("--disable-ray-verification", action="store_true")
     parser.add_argument("--ray-verifier-workers", type=int, default=4)
     parser.add_argument("--verifier-type", type=str, default="math", choices=["math", "code"])
-    parser.add_argument("--distributed-timeout-minutes", type=int, default=120)
+    parser.add_argument(
+        "--distributed-timeout-minutes",
+        type=int,
+        default=0,
+        help="Distributed process-group timeout in minutes. Use 0 for no practical timeout.",
+    )
     parser.add_argument(
         "--num-gpus",
         type=str,
