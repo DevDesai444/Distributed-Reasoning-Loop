@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -23,13 +24,112 @@ from .runtime_utils import build_causal_lm_load_kwargs, get_runtime_device
 logger = logging.getLogger(__name__)
 
 
+class RayMathVerificationPool:
+    """
+    Local Ray actor pool for parallel math verification.
+    Works in single-node environments like Kaggle notebooks.
+    """
+
+    def __init__(self, num_workers: int = 4):
+        self.num_workers = max(1, num_workers)
+        self._ray = None
+        self._actors = []
+        self._next_actor = 0
+        self._enabled = False
+        self._stats: Dict[str, int] = {
+            "submitted": 0,
+            "completed": 0,
+            "failed": 0,
+        }
+        self._local_verifier = create_verifier("math")
+        self._init_pool()
+
+    def _init_pool(self):
+        try:
+            import ray
+
+            self._ray = ray
+            if not ray.is_initialized():
+                ray.init(ignore_reinit_error=True, include_dashboard=False, log_to_driver=False)
+
+            @ray.remote
+            class _MathVerifierWorker:
+                def __init__(self):
+                    self.verifier = create_verifier("math")
+
+                def verify(self, reasoning: str, expected_answer: str) -> str:
+                    result = self.verifier.verify_reasoning_path(reasoning, expected_answer)
+                    return result.status.value
+
+            self._actors = [_MathVerifierWorker.remote() for _ in range(self.num_workers)]
+            self._enabled = len(self._actors) > 0
+            logger.info("Initialized Ray math verification pool with %s workers", len(self._actors))
+        except Exception as exc:
+            logger.warning("Ray verification pool unavailable, using local verification fallback: %s", exc)
+            self._enabled = False
+            self._actors = []
+
+    def verify_batch(self, responses: List[str], expected_answer: str) -> List[str]:
+        if not responses:
+            return []
+        ticket = self.submit_verify_batch(responses, expected_answer)
+        return self.resolve_verify_batch(ticket)
+
+    def submit_verify_batch(self, responses: List[str], expected_answer: str):
+        if not responses:
+            return ("empty", [])
+
+        self._stats["submitted"] += len(responses)
+
+        if not self._enabled:
+            statuses = []
+            for response in responses:
+                result = self._local_verifier.verify_reasoning_path(response, expected_answer)
+                statuses.append(result.status.value)
+            return ("local", statuses)
+
+        futures = []
+        for response in responses:
+            actor = self._actors[self._next_actor]
+            self._next_actor = (self._next_actor + 1) % len(self._actors)
+            futures.append(actor.verify.remote(response, expected_answer))
+        return ("ray", futures, responses, expected_answer)
+
+    def resolve_verify_batch(self, ticket) -> List[str]:
+        mode = ticket[0]
+        if mode == "empty":
+            return []
+        if mode == "local":
+            statuses = ticket[1]
+            self._stats["completed"] += len(statuses)
+            return statuses
+
+        _, futures, responses, expected_answer = ticket
+        try:
+            statuses = self._ray.get(futures)
+            self._stats["completed"] += len(statuses)
+            return statuses
+        except Exception as exc:
+            logger.warning("Ray verify_batch failed, falling back to local verifier: %s", exc)
+            self._stats["failed"] += len(responses)
+            statuses = []
+            for response in responses:
+                result = self._local_verifier.verify_reasoning_path(response, expected_answer)
+                statuses.append(result.status.value)
+            self._stats["completed"] += len(statuses)
+            return statuses
+
+    def get_stats(self) -> Dict[str, int]:
+        return dict(self._stats)
+
+
 @dataclass
 class GRPOConfig:
     """Configuration for GRPO training."""
 
     model_name: str = "Qwen/Qwen2.5-7B-Instruct"
 
-    group_size: int = 2
+    group_size: int = 8
     kl_coef: float = 0.1
     clip_range: float = 0.2
     kl_threshold: float = 0.1
@@ -65,6 +165,22 @@ class GRPOConfig:
     code_docker_image: str = field(default_factory=get_default_sandbox_image)
     code_memory_limit: str = "512m"
 
+    online_max_new_tokens: int = 256
+    online_temperature: float = 0.8
+    online_top_p: float = 0.95
+    online_resample_attempts: int = 2
+    online_min_reward_std: float = 1e-6
+    enable_ray_verification: bool = True
+    ray_verifier_workers: int = 4
+
+    reward_correct: float = 1.0
+    reward_incorrect: float = 0.0
+    reward_parse_error: float = -0.25
+    reward_timeout: float = -0.25
+    reward_unknown: float = -0.1
+    reward_clip_min: float = -1.0
+    reward_clip_max: float = 1.0
+
     wandb_project: str = "distributed-reasoning-loop"
     wandb_mode: str = "offline"
 
@@ -92,16 +208,22 @@ class GRPODataset(Dataset):
                 prompt = item.get("prompt", "")
                 bucket = prompt_to_responses.setdefault(
                     prompt,
-                    {"prompt": prompt, "chosen": [], "rejected": []},
+                    {"prompt": prompt, "chosen": [], "rejected": [], "expected_answer": None},
                 )
                 bucket["chosen"].append(item["chosen"])
                 bucket["rejected"].append(item["rejected"])
+                if bucket["expected_answer"] is None:
+                    bucket["expected_answer"] = (
+                        item.get("expected_answer")
+                        or item.get("chosen_answer")
+                        or item.get("answer")
+                    )
                 continue
 
             prompt = item.get("prompt", item.get("problem", ""))
             bucket = prompt_to_responses.setdefault(
                 prompt,
-                {"prompt": prompt, "chosen": [], "rejected": []},
+                {"prompt": prompt, "chosen": [], "rejected": [], "expected_answer": None},
             )
 
             response = item.get("reasoning", item.get("response", ""))
@@ -110,7 +232,14 @@ class GRPODataset(Dataset):
             else:
                 bucket["rejected"].append(response)
 
-        groups = [group for group in prompt_to_responses.values() if group["chosen"] and group["rejected"]]
+            if bucket["expected_answer"] is None:
+                bucket["expected_answer"] = item.get("expected_answer") or item.get("answer")
+
+        groups = [
+            group
+            for group in prompt_to_responses.values()
+            if group["prompt"] and (group["expected_answer"] is not None or len(group["chosen"]) > 0)
+        ]
         logger.info("Created %s GRPO prompt groups", len(groups))
         return groups
 
@@ -122,7 +251,7 @@ class GRPODataset(Dataset):
 
 
 class ReasoningGRPOTrainer:
-    """Custom GRPO trainer with offline verifier-backed evaluation."""
+    """Custom GRPO trainer with online verifier-backed rewards."""
 
     def __init__(self, config: GRPOConfig):
         self.config = config
@@ -134,6 +263,7 @@ class ReasoningGRPOTrainer:
         self.device = get_runtime_device()
         self.use_kbit_training = False
         self.verifier = None
+        self.verification_pool: Optional[RayMathVerificationPool] = None
         self._heldout_problems: Optional[List[Dict[str, str]]] = None
 
     def _setup_verifier(self):
@@ -145,6 +275,120 @@ class ReasoningGRPOTrainer:
                 "memory_limit": self.config.code_memory_limit,
             }
         self.verifier = create_verifier(self.config.verifier_type, **verifier_kwargs)
+        if self.config.verifier_type == "math" and self.config.enable_ray_verification:
+            self.verification_pool = RayMathVerificationPool(
+                num_workers=self.config.ray_verifier_workers
+            )
+
+    def _build_sequence_encodings(self, prompt: str, responses: List[str], device: torch.device):
+        sequences = [
+            self.tokenizer.apply_chat_template(
+                [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": response},
+                ],
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            for response in responses
+        ]
+        return self.tokenizer(
+            sequences,
+            padding=True,
+            truncation=True,
+            max_length=self.config.max_length,
+            return_tensors="pt",
+        ).to(device)
+
+    def _status_to_reward(self, status: str) -> float:
+        if status == "correct":
+            reward = self.config.reward_correct
+        elif status == "incorrect":
+            reward = self.config.reward_incorrect
+        elif status == "parse_error":
+            reward = self.config.reward_parse_error
+        elif status == "timeout":
+            reward = self.config.reward_timeout
+        else:
+            reward = self.config.reward_unknown
+
+        return float(
+            max(
+                self.config.reward_clip_min,
+                min(self.config.reward_clip_max, reward),
+            )
+        )
+
+    def _score_response(self, response: str, expected_answer: Optional[str]) -> float:
+        if self.config.verifier_type != "math" or not expected_answer:
+            return 0.0
+
+        result = self.verifier.verify_reasoning_path(response, expected_answer)
+        return self._status_to_reward(result.status.value)
+
+    def _resolve_expected_answer(self, group: Dict[str, Any]) -> Optional[str]:
+        expected = group.get("expected_answer")
+        if expected:
+            return expected
+
+        if self.config.verifier_type != "math":
+            return None
+
+        if not hasattr(self.verifier, "extract_final_answer"):
+            return None
+
+        # Fall back to extracting from a known-good chosen response.
+        for chosen in group.get("chosen", []):
+            answer = self.verifier.extract_final_answer(chosen)
+            if answer:
+                return answer
+        return None
+
+    def _sample_group_responses(self, prompt: str) -> List[str]:
+        messages = [{"role": "user", "content": prompt}]
+        prompt_text = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        inputs = self.tokenizer(
+            prompt_text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=self.config.max_prompt_length,
+        )
+        device = next(self.model.parameters()).device
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+
+        input_ids = inputs["input_ids"].repeat(self.config.group_size, 1)
+        attention_mask = inputs["attention_mask"].repeat(self.config.group_size, 1)
+        prompt_len = inputs["input_ids"].shape[1]
+
+        was_training = self.model.training
+        self.model.eval()
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=self.config.online_max_new_tokens,
+                do_sample=True,
+                temperature=self.config.online_temperature,
+                top_p=self.config.online_top_p,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+        if was_training:
+            self.model.train()
+
+        responses: List[str] = []
+        for idx in range(outputs.shape[0]):
+            responses.append(
+                self.tokenizer.decode(
+                    outputs[idx, prompt_len:],
+                    skip_special_tokens=True,
+                )
+            )
+        return responses
 
     def setup(self):
         """Load tokenizer, policy model, reference model, and verifier."""
@@ -230,92 +474,122 @@ class ReasoningGRPOTrainer:
         mask = (shift_labels != self.tokenizer.pad_token_id).float()
         return (gathered * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)
 
-    def compute_grpo_loss(
+    def _zero_loss_metrics(
+        self,
+        device: torch.device,
+        mean_reward: float = 0.0,
+        reward_std: float = 0.0,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        zero = torch.tensor(0.0, device=device, requires_grad=True)
+        return zero, {
+            "policy_loss": 0.0,
+            "kl_div": 0.0,
+            "ratio_mean": 1.0,
+            "mean_reward": float(mean_reward),
+            "reward_std": float(reward_std),
+        }
+
+    def _verify_responses(self, responses: List[str], expected_answer: str) -> List[str]:
+        if self.verification_pool is not None:
+            return self.verification_pool.verify_batch(responses, expected_answer)
+        statuses = []
+        for response in responses:
+            result = self.verifier.verify_reasoning_path(response, expected_answer)
+            statuses.append(result.status.value)
+        return statuses
+
+    def _reward_stats_from_statuses(self, statuses: List[str]) -> Tuple[torch.Tensor, float]:
+        rewards = [self._status_to_reward(status) for status in statuses]
+        rewards_tensor = torch.tensor(
+            rewards,
+            device=next(self.model.parameters()).device,
+            dtype=torch.float32,
+        )
+        reward_std = float(rewards_tensor.std(unbiased=False).item()) if len(rewards) > 0 else 0.0
+        return rewards_tensor, reward_std
+
+    def _compute_loss_from_verified_statuses(
         self,
         prompt: str,
-        chosen_responses: List[str],
-        rejected_responses: List[str],
+        responses: List[str],
+        statuses: List[str],
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute GRPO loss and monitoring metrics for a grouped prompt."""
         device = next(self.model.parameters()).device
-        n_each = max(self.config.group_size // 2, 1)
+        if not responses or not statuses:
+            return self._zero_loss_metrics(device)
 
-        responses: list[str] = []
-        raw_rewards: list[float] = []
-        advantages: list[float] = []
-
-        for response in chosen_responses[:n_each]:
-            responses.append(response)
-            raw_rewards.append(1.0)
-            advantages.append(1.0)
-
-        for response in rejected_responses[:n_each]:
-            responses.append(response)
-            raw_rewards.append(0.0)
-            advantages.append(-1.0)
-
-        if not responses:
-            zero = torch.tensor(0.0, device=device, requires_grad=True)
-            return zero, {
-                "policy_loss": 0.0,
-                "kl_div": 0.0,
-                "ratio_mean": 1.0,
-                "mean_reward": 0.0,
-                "reward_std": 0.0,
-            }
-
-        advantages_tensor = torch.tensor(advantages, device=device, dtype=torch.float32)
-        advantages_tensor = (advantages_tensor - advantages_tensor.mean()) / (advantages_tensor.std() + 1e-8)
-        target_tensor = torch.tensor(raw_rewards, device=device, dtype=torch.float32)
-
-        sequences = [
-            self.tokenizer.apply_chat_template(
-                [
-                    {"role": "user", "content": prompt},
-                    {"role": "assistant", "content": response},
-                ],
-                tokenize=False,
-                add_generation_prompt=False,
+        rewards_tensor, reward_std = self._reward_stats_from_statuses(statuses)
+        if reward_std < self.config.online_min_reward_std:
+            return self._zero_loss_metrics(
+                device,
+                mean_reward=float(rewards_tensor.mean().item()) if rewards_tensor.numel() > 0 else 0.0,
+                reward_std=reward_std,
             )
-            for response in responses
-        ]
-        encodings = self.tokenizer(
-            sequences,
-            padding=True,
-            truncation=True,
-            max_length=self.config.max_length,
-            return_tensors="pt",
-        ).to(device)
 
+        if reward_std < 1e-8:
+            advantages_tensor = rewards_tensor - rewards_tensor.mean()
+        else:
+            advantages_tensor = (rewards_tensor - rewards_tensor.mean()) / (reward_std + 1e-8)
+
+        encodings = self._build_sequence_encodings(prompt, responses, device)
         input_ids = encodings["input_ids"]
         attention_mask = encodings["attention_mask"]
-        policy_log_probs = self.compute_log_probs(self.model, input_ids, attention_mask, input_ids)
-        with torch.no_grad():
-            ref_log_probs = self.compute_log_probs(self.ref_model, input_ids, attention_mask, input_ids)
 
-        log_ratio = policy_log_probs - ref_log_probs
+        with torch.no_grad():
+            old_log_probs = self.compute_log_probs(self.model, input_ids, attention_mask, input_ids)
+        policy_log_probs = self.compute_log_probs(self.model, input_ids, attention_mask, input_ids)
+
+        log_ratio = policy_log_probs - old_log_probs
         ratio = torch.exp(log_ratio)
         clipped_ratio = torch.clamp(ratio, 1 - self.config.clip_range, 1 + self.config.clip_range)
         policy_loss = -torch.min(ratio * advantages_tensor, clipped_ratio * advantages_tensor).mean()
 
-        # Positive KL proxy that is stable for per-sample logging.
-        kl_div = torch.mean(torch.exp(log_ratio) - 1.0 - log_ratio)
+        with torch.no_grad():
+            ref_log_probs = self.compute_log_probs(self.ref_model, input_ids, attention_mask, input_ids)
+        log_ratio_ref = policy_log_probs - ref_log_probs
+        kl_div = torch.mean(torch.exp(log_ratio_ref) - 1.0 - log_ratio_ref)
         loss = policy_loss + self.config.kl_coef * kl_div
 
-        preference_confidence = torch.where(
-            target_tensor > 0.5,
-            torch.sigmoid(log_ratio),
-            1.0 - torch.sigmoid(log_ratio),
-        )
-
-        metrics = {
+        return loss, {
             "policy_loss": float(policy_loss.item()),
             "kl_div": float(kl_div.item()),
             "ratio_mean": float(ratio.mean().item()),
-            "mean_reward": float(preference_confidence.mean().item()),
-            "reward_std": float(preference_confidence.std(unbiased=False).item()),
+            "mean_reward": float(rewards_tensor.mean().item()),
+            "reward_std": reward_std,
         }
-        return loss, metrics
+
+    def compute_online_grpo_loss(
+        self,
+        prompt: str,
+        expected_answer: Optional[str],
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Compute GRPO loss from online generation and verifier-derived rewards.
+        """
+        device = next(self.model.parameters()).device
+        if not expected_answer:
+            return self._zero_loss_metrics(device)
+
+        responses: List[str] = []
+        statuses: List[str] = []
+        reward_std = 0.0
+
+        # Resample a few times to reduce zero-variance groups (all-correct/all-incorrect),
+        # which otherwise produce near-zero advantages and weak gradient signal.
+        max_attempts = max(1, self.config.online_resample_attempts + 1)
+        for _ in range(max_attempts):
+            responses = self._sample_group_responses(prompt)
+            if not responses:
+                break
+            statuses = self._verify_responses(responses, expected_answer)
+            _, reward_std = self._reward_stats_from_statuses(statuses)
+            if reward_std >= self.config.online_min_reward_std:
+                break
+
+        if not responses:
+            return self._zero_loss_metrics(device)
+
+        return self._compute_loss_from_verified_statuses(prompt, responses, statuses)
 
     def _build_scheduler(self, dataset_size: int):
         from transformers import get_linear_schedule_with_warmup
@@ -420,6 +694,8 @@ class ReasoningGRPOTrainer:
     def train(self, data: List[Dict[str, Any]]):
         """Train the policy with custom GRPO updates."""
         self.setup()
+        if self.config.verifier_type != "math":
+            raise ValueError("GRPO training currently supports verifier_type='math' only.")
 
         dataset = GRPODataset(
             data,
@@ -463,6 +739,7 @@ class ReasoningGRPOTrainer:
             micro_batches_since_update = 0
 
             for batch_idx in progress:
+                batch_wall_start = time.perf_counter()
                 accumulated_loss = 0.0
                 batch_metrics = {
                     "policy_loss": 0.0,
@@ -471,15 +748,104 @@ class ReasoningGRPOTrainer:
                     "mean_reward": 0.0,
                     "reward_std": 0.0,
                 }
+                rollout_time_s = 0.0
+                verify_wait_time_s = 0.0
+                resample_time_s = 0.0
                 items_in_batch = min(self.config.batch_size, len(dataset) - batch_idx)
 
+                pending_rollouts: List[Dict[str, Any]] = []
                 for item_offset in range(items_in_batch):
                     group = dataset[batch_idx + item_offset]
-                    loss, metrics = self.compute_grpo_loss(
-                        group["prompt"],
-                        group["chosen"],
-                        group["rejected"],
+                    prompt = group["prompt"]
+                    expected_answer = self._resolve_expected_answer(group)
+
+                    # Phase 1: rollout generation + async verification submit.
+                    if not expected_answer:
+                        pending_rollouts.append(
+                            {
+                                "prompt": prompt,
+                                "expected_answer": None,
+                                "responses": [],
+                                "ticket": None,
+                            }
+                        )
+                        continue
+
+                    rollout_start = time.perf_counter()
+                    responses = self._sample_group_responses(prompt)
+                    rollout_time_s += time.perf_counter() - rollout_start
+                    if not responses:
+                        pending_rollouts.append(
+                            {
+                                "prompt": prompt,
+                                "expected_answer": expected_answer,
+                                "responses": [],
+                                "ticket": None,
+                            }
+                        )
+                        continue
+
+                    if self.verification_pool is not None:
+                        ticket = self.verification_pool.submit_verify_batch(responses, expected_answer)
+                    else:
+                        verify_start = time.perf_counter()
+                        ticket = ("local", self._verify_responses(responses, expected_answer))
+                        verify_wait_time_s += time.perf_counter() - verify_start
+
+                    pending_rollouts.append(
+                        {
+                            "prompt": prompt,
+                            "expected_answer": expected_answer,
+                            "responses": responses,
+                            "ticket": ticket,
+                        }
                     )
+
+                # Phase 2: resolve verification + compute losses.
+                for pending in pending_rollouts:
+                    prompt = pending["prompt"]
+                    expected_answer = pending["expected_answer"]
+                    responses = pending["responses"]
+                    ticket = pending["ticket"]
+
+                    if not expected_answer or not responses or ticket is None:
+                        loss, metrics = self._zero_loss_metrics(next(self.model.parameters()).device)
+                    else:
+                        if self.verification_pool is not None:
+                            resolve_start = time.perf_counter()
+                            statuses = self.verification_pool.resolve_verify_batch(ticket)
+                            verify_wait_time_s += time.perf_counter() - resolve_start
+                        else:
+                            statuses = ticket[1]
+
+                        # If rewards are near-constant, retry with fresh responses to recover signal.
+                        _, reward_std = self._reward_stats_from_statuses(statuses)
+                        retries = 0
+                        while (
+                            reward_std < self.config.online_min_reward_std
+                            and retries < self.config.online_resample_attempts
+                        ):
+                            resample_rollout_start = time.perf_counter()
+                            responses = self._sample_group_responses(prompt)
+                            delta_rollout = time.perf_counter() - resample_rollout_start
+                            rollout_time_s += delta_rollout
+                            resample_time_s += delta_rollout
+                            if not responses:
+                                break
+                            resample_verify_start = time.perf_counter()
+                            statuses = self._verify_responses(responses, expected_answer)
+                            delta_verify = time.perf_counter() - resample_verify_start
+                            verify_wait_time_s += delta_verify
+                            resample_time_s += delta_verify
+                            _, reward_std = self._reward_stats_from_statuses(statuses)
+                            retries += 1
+
+                        loss, metrics = self._compute_loss_from_verified_statuses(
+                            prompt,
+                            responses,
+                            statuses if responses else [],
+                        )
+
                     (loss / self.config.gradient_accumulation_steps).backward()
                     accumulated_loss += float(loss.item())
                     for key, value in metrics.items():
@@ -516,6 +882,14 @@ class ReasoningGRPOTrainer:
                 current_lr = self.scheduler.get_last_lr()[0]
                 mean_reward = batch_metrics["mean_reward"] / max(items_in_batch, 1)
                 reward_std = batch_metrics["reward_std"] / max(items_in_batch, 1)
+                batch_wall_time_s = time.perf_counter() - batch_wall_start
+                rollout_time_ms = rollout_time_s * 1000.0
+                verify_wait_time_ms = verify_wait_time_s * 1000.0
+                batch_wall_time_ms = batch_wall_time_s * 1000.0
+                gpu_idle_estimate_ms = min(verify_wait_time_ms, batch_wall_time_ms)
+                overlap_efficiency = (
+                    rollout_time_ms / max(rollout_time_ms + verify_wait_time_ms, 1e-6)
+                )
                 log_entry = {
                     "step": global_step,
                     "epoch": epoch + (batch_idx / len(dataset)),
@@ -528,6 +902,12 @@ class ReasoningGRPOTrainer:
                     "mean_reward": mean_reward,
                     "reward_std": reward_std,
                     "lr_reduced_for_kl": lr_reduced,
+                    "rollout_time_ms": rollout_time_ms,
+                    "verify_wait_time_ms": verify_wait_time_ms,
+                    "gpu_idle_estimate_ms": gpu_idle_estimate_ms,
+                    "batch_wall_time_ms": batch_wall_time_ms,
+                    "overlap_efficiency": overlap_efficiency,
+                    "resample_time_ms": resample_time_s * 1000.0,
                 }
 
                 with open(metrics_file, "a") as handle:
@@ -543,9 +923,25 @@ class ReasoningGRPOTrainer:
                         "train/learning_rate": current_lr,
                         "train/mean_reward": mean_reward,
                         "train/reward_std": reward_std,
+                        "perf/rollout_time_ms": rollout_time_ms,
+                        "perf/verify_wait_time_ms": verify_wait_time_ms,
+                        "perf/gpu_idle_estimate_ms": gpu_idle_estimate_ms,
+                        "perf/batch_wall_time_ms": batch_wall_time_ms,
+                        "perf/overlap_efficiency": overlap_efficiency,
+                        "perf/resample_time_ms": resample_time_s * 1000.0,
                     },
                     step=global_step,
                 )
+                if self.verification_pool is not None:
+                    verify_stats = self.verification_pool.get_stats()
+                    log_to_wandb(
+                        {
+                            "verify/submitted": verify_stats.get("submitted", 0),
+                            "verify/completed": verify_stats.get("completed", 0),
+                            "verify/failed": verify_stats.get("failed", 0),
+                        },
+                        step=global_step,
+                    )
 
                 if self.config.eval_interval_steps > 0 and global_step % self.config.eval_interval_steps == 0:
                     self.evaluate_checkpoint(global_step)
@@ -583,6 +979,13 @@ def train_grpo_from_synthetic_data(
     model_name: str = "Qwen/Qwen2.5-7B-Instruct",
     num_epochs: int = 1,
     batch_size: int = 2,
+    group_size: int = 8,
+    online_max_new_tokens: int = 256,
+    online_temperature: float = 0.8,
+    online_top_p: float = 0.95,
+    online_resample_attempts: int = 2,
+    enable_ray_verification: bool = True,
+    ray_verifier_workers: int = 4,
     verifier_type: str = "math",
 ):
     """Convenience entry point for GRPO training from a JSONL file."""
@@ -596,6 +999,13 @@ def train_grpo_from_synthetic_data(
         output_dir=output_dir,
         num_epochs=num_epochs,
         batch_size=batch_size,
+        group_size=group_size,
+        online_max_new_tokens=online_max_new_tokens,
+        online_temperature=online_temperature,
+        online_top_p=online_top_p,
+        online_resample_attempts=online_resample_attempts,
+        enable_ray_verification=enable_ray_verification,
+        ray_verifier_workers=ray_verifier_workers,
         verifier_type=verifier_type,
     )
 
@@ -613,6 +1023,14 @@ if __name__ == "__main__":
     parser.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-7B-Instruct")
     parser.add_argument("--num-epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--group-size", type=int, default=8)
+    parser.add_argument("--online-max-new-tokens", type=int, default=256)
+    parser.add_argument("--online-temperature", type=float, default=0.8)
+    parser.add_argument("--online-top-p", type=float, default=0.95)
+    parser.add_argument("--online-resample-attempts", type=int, default=2)
+    parser.add_argument("--enable-ray-verification", action="store_true")
+    parser.add_argument("--disable-ray-verification", action="store_true")
+    parser.add_argument("--ray-verifier-workers", type=int, default=4)
     parser.add_argument("--verifier-type", type=str, default="math", choices=["math", "code"])
     args = parser.parse_args()
 
@@ -622,5 +1040,12 @@ if __name__ == "__main__":
         model_name=args.model_name,
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
+        group_size=args.group_size,
+        online_max_new_tokens=args.online_max_new_tokens,
+        online_temperature=args.online_temperature,
+        online_top_p=args.online_top_p,
+        online_resample_attempts=args.online_resample_attempts,
+        enable_ray_verification=(False if args.disable_ray_verification else True if args.enable_ray_verification else True),
+        ray_verifier_workers=args.ray_verifier_workers,
         verifier_type=args.verifier_type,
     )
