@@ -88,18 +88,63 @@ def run_data_generation(config, args):
     """Run synthetic data generation phase."""
     from data_generator import SyntheticDataPipeline, GenerationConfig
     from data_generator.cot_generator import InferenceBackend
+
+    def resolve_tensor_parallel_size(requested, backend_name: str) -> int:
+        if backend_name != "vllm":
+            return 1
+        value = "auto" if requested is None else str(requested).strip().lower()
+        if value in {"auto", "all"}:
+            try:
+                import torch
+
+                available = torch.cuda.device_count() if torch.cuda.is_available() else 0
+                return max(1, available)
+            except Exception:
+                return 1
+        try:
+            return max(1, int(value))
+        except ValueError:
+            logger.warning("Invalid tensor_parallel_size=%s, defaulting to 1", requested)
+            return 1
     
     logger.info("=" * 50)
     logger.info("Phase 1: Synthetic Data Generation")
     logger.info("=" * 50)
+
+    backend_map = {}
+    if hasattr(InferenceBackend, "VLLM"):
+        backend_map["vllm"] = InferenceBackend.VLLM
+    if hasattr(InferenceBackend, "SGLANG"):
+        backend_map["sglang"] = InferenceBackend.SGLANG
+    if hasattr(InferenceBackend, "TRANSFORMERS"):
+        backend_map["transformers"] = InferenceBackend.TRANSFORMERS
+
+    backend_name = str(config.data_generator.get("backend", "vllm")).lower()
+    if backend_name not in backend_map:
+        raise ValueError(f"Unsupported data_generator.backend='{backend_name}'")
+    tensor_parallel_size = resolve_tensor_parallel_size(
+        config.data_generator.get("tensor_parallel_size", "auto"),
+        backend_name=backend_name,
+    )
+    gpu_memory_utilization = float(config.data_generator.get("gpu_memory_utilization", 0.9))
     
     gen_config = GenerationConfig(
         model_name=config.data_generator.teacher_model,
-        backend=InferenceBackend.VLLM,
+        backend=backend_map[backend_name],
         num_paths=config.data_generator.num_cot_paths,
         max_new_tokens=config.data_generator.max_new_tokens,
         temperature=config.data_generator.temperature,
+        top_p=config.data_generator.get("top_p", 0.95),
+        tensor_parallel_size=tensor_parallel_size,
+        gpu_memory_utilization=gpu_memory_utilization,
     )
+    logger.info("Generation backend: %s", backend_name)
+    if backend_name == "vllm":
+        logger.info(
+            "vLLM tensor_parallel_size=%s gpu_memory_utilization=%.2f",
+            tensor_parallel_size,
+            gpu_memory_utilization,
+        )
     
     pipeline = SyntheticDataPipeline(
         generator_config=gen_config,
