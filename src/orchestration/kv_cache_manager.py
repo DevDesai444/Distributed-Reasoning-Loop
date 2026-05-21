@@ -115,6 +115,22 @@ class KVCacheManager:
             else:
                 self.stats.misses += 1
                 return None, 0
+
+    def get_prefix_match_length(self, tokens: List[int]) -> int:
+        """
+        Return only the longest matched prefix length for a token sequence.
+        Useful when engines keep KV tensors in their native runtime, but still
+        want cache-hit accounting and cache-aware scheduling decisions.
+        """
+        with self._lock:
+            entry, matched_length = self._find_longest_prefix(tokens)
+            if entry is not None:
+                self.cache.move_to_end(entry.key_hash)
+                entry.update_access()
+                self.stats.hits += 1
+                return matched_length
+            self.stats.misses += 1
+            return 0
     
     def put(
         self,
@@ -137,6 +153,11 @@ class KVCacheManager:
             size_bytes = self._estimate_size(kv_tensors)
         
         with self._lock:
+            if key_hash in self.cache:
+                existing = self.cache[key_hash]
+                self.stats.memory_used_bytes -= existing.size_bytes
+                del self.cache[key_hash]
+
             # Evict if necessary
             while (self.stats.memory_used_bytes + size_bytes > self.max_memory_bytes
                    and self.cache):
@@ -153,7 +174,37 @@ class KVCacheManager:
             self.cache[key_hash] = entry
             self.stats.memory_used_bytes += size_bytes
             self.stats.total_entries = len(self.cache)
-    
+
+    def record_prefix(
+        self,
+        tokens: List[int],
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        Record a prefix in the cache index even when external runtimes own the
+        real KV tensors. This keeps the local cache index aligned with observed
+        traffic patterns for scheduling and instrumentation.
+        """
+        key_hash = self._compute_hash(tokens)
+        with self._lock:
+            existing = self.cache.get(key_hash)
+            if existing is not None:
+                self.cache.move_to_end(key_hash)
+                existing.update_access()
+                if metadata:
+                    existing.metadata.update(metadata)
+                return
+
+        # Store a lightweight placeholder entry outside the lock path using put().
+        # Keep non-zero size so memory bounds and eviction policies still apply.
+        placeholder_size = max(64, len(tokens) * 4)
+        self.put(tokens=tokens, kv_tensors=True, size_bytes=placeholder_size)
+        if metadata:
+            with self._lock:
+                created = self.cache.get(key_hash)
+                if created is not None:
+                    created.metadata.update(metadata)
+
     def _estimate_size(self, kv_tensors: Any) -> int:
         """Estimate size of KV tensors in bytes."""
         if kv_tensors is None:
