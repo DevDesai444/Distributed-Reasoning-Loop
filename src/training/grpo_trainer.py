@@ -635,11 +635,15 @@ class ReasoningGRPOTrainer:
 
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
-        log_probs = F.log_softmax(shift_logits.float(), dim=-1)
+        selected_logits = torch.gather(
+            shift_logits,
+            dim=-1,
+            index=shift_labels.unsqueeze(-1),
+        ).squeeze(-1)
+        token_log_probs = selected_logits - torch.logsumexp(shift_logits, dim=-1)
 
-        gathered = torch.gather(log_probs, dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
         mask = (shift_labels != self.tokenizer.pad_token_id).float()
-        return (gathered * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)
+        return (token_log_probs * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)
 
     def _adapter_disabled_context(self, model):
         disable_adapter = getattr(model, "disable_adapter", None)
