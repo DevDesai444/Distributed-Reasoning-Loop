@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -543,23 +544,27 @@ class ReasoningGRPOTrainer:
         if self.config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
-        ref_model_kwargs, _ = build_causal_lm_load_kwargs(
-            prefer_bf16=self.config.bf16,
-            allow_8bit=True,
-        )
-        if self.distributed and torch.cuda.is_available():
-            ref_model_kwargs.pop("device_map", None)
-            ref_model_kwargs["device_map"] = {"": self.local_rank}
-        self.ref_model = AutoModelForCausalLM.from_pretrained(
-            self.config.model_name,
-            **ref_model_kwargs,
-        )
-        if torch.cuda.is_available():
-            if self.distributed:
-                self.ref_model.to(self.device)
+        if self.config.use_lora:
+            self.ref_model = None
+            logger.info("Using adapter-disabled policy model as GRPO reference model to reduce memory.")
         else:
-            self.ref_model.to(self.device)
-        self.ref_model.eval()
+            ref_model_kwargs, _ = build_causal_lm_load_kwargs(
+                prefer_bf16=self.config.bf16,
+                allow_8bit=True,
+            )
+            if self.distributed and torch.cuda.is_available():
+                ref_model_kwargs.pop("device_map", None)
+                ref_model_kwargs["device_map"] = {"": self.local_rank}
+            self.ref_model = AutoModelForCausalLM.from_pretrained(
+                self.config.model_name,
+                **ref_model_kwargs,
+            )
+            if torch.cuda.is_available():
+                if self.distributed:
+                    self.ref_model.to(self.device)
+            else:
+                self.ref_model.to(self.device)
+            self.ref_model.eval()
 
         if self.distributed:
             self.model = DDP(
@@ -614,6 +619,12 @@ class ReasoningGRPOTrainer:
         gathered = torch.gather(log_probs, dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
         mask = (shift_labels != self.tokenizer.pad_token_id).float()
         return (gathered * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)
+
+    def _adapter_disabled_context(self, model):
+        disable_adapter = getattr(model, "disable_adapter", None)
+        if callable(disable_adapter):
+            return disable_adapter()
+        return nullcontext()
 
     def _zero_loss_metrics(
         self,
@@ -686,7 +697,17 @@ class ReasoningGRPOTrainer:
         policy_loss = -torch.min(ratio * advantages_tensor, clipped_ratio * advantages_tensor).mean()
 
         with torch.no_grad():
-            ref_log_probs = self.compute_log_probs(self.ref_model, input_ids, attention_mask, input_ids)
+            if self.ref_model is not None:
+                ref_log_probs = self.compute_log_probs(self.ref_model, input_ids, attention_mask, input_ids)
+            else:
+                reference_model = self._unwrap_model()
+                with self._adapter_disabled_context(reference_model):
+                    ref_log_probs = self.compute_log_probs(
+                        reference_model,
+                        input_ids,
+                        attention_mask,
+                        input_ids,
+                    )
         log_ratio_ref = policy_log_probs - ref_log_probs
         kl_div = torch.mean(torch.exp(log_ratio_ref) - 1.0 - log_ratio_ref)
         loss = policy_loss + self.config.kl_coef * kl_div
