@@ -451,6 +451,10 @@ The default configuration lives in `config/default.yaml` and covers:
 - evaluation and reranking paths
 - W&B offline logging
 
+Kafka streaming is integrated into the data-generation stage through
+`scripts/run_pipeline.py` and is controlled by
+`orchestration.kafka.enabled` (default `false`).
+
 This makes the project easy to repurpose as either:
 
 - a local experimentation repo
@@ -469,7 +473,7 @@ This project is intentionally ambitious, and the current repository still has na
 
 - benchmark sizes in the included artifacts are modest
 - performance claims are strongest in verifiable domains, not open-ended reasoning
-- some orchestration modules are infrastructure scaffolding rather than a production deployment
+- some orchestration paths are optional and disabled by default (for example Kafka streaming)
 - reward models and PRMs depend on the quality of generated preference data
 - code verification assumes a working Docker-based sandbox environment
 

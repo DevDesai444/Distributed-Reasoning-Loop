@@ -27,6 +27,7 @@ verifier:
 
 orchestration:
   kafka:
+    enabled: false
     bootstrap_servers: ["localhost:9092"]
     topics:
       raw_reasoning_data: "raw_reasoning_data"
