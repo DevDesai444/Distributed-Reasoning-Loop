@@ -3,6 +3,7 @@ vLLM inference engine wrapper.
 Provides high-throughput inference for reasoning models.
 """
 
+import os
 import logging
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Tuple
@@ -15,6 +16,24 @@ except ImportError:  # pragma: no cover - import path fallback for script usage
 logger = logging.getLogger(__name__)
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str) -> Optional[int]:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("Ignoring invalid integer environment variable %s=%r", name, value)
+        return None
+
+
 @dataclass
 class VLLMConfig:
     """Configuration for vLLM engine."""
@@ -22,6 +41,8 @@ class VLLMConfig:
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.9
     max_model_len: int = 4096
+    enforce_eager: bool = False
+    disable_custom_all_reduce: bool = False
     
     # Sampling
     temperature: float = 0.8
@@ -130,15 +151,21 @@ class VLLMEngine:
         
         try:
             from vllm import LLM, SamplingParams
-            
-            self.llm = LLM(
-                model=self.config.model_name,
-                tensor_parallel_size=self.config.tensor_parallel_size,
-                gpu_memory_utilization=self.config.gpu_memory_utilization,
-                max_model_len=self.config.max_model_len,
-                enable_prefix_caching=self.config.enable_prefix_caching,
-                trust_remote_code=True,
-            )
+
+            llm_kwargs = {
+                "model": self.config.model_name,
+                "tensor_parallel_size": self.config.tensor_parallel_size,
+                "gpu_memory_utilization": self.config.gpu_memory_utilization,
+                "max_model_len": _env_int("DRL_VLLM_MAX_MODEL_LEN") or self.config.max_model_len,
+                "enable_prefix_caching": self.config.enable_prefix_caching,
+                "trust_remote_code": True,
+            }
+            if self.config.enforce_eager or _env_flag("DRL_VLLM_ENFORCE_EAGER"):
+                llm_kwargs["enforce_eager"] = True
+            if self.config.disable_custom_all_reduce or _env_flag("DRL_VLLM_DISABLE_CUSTOM_ALL_REDUCE"):
+                llm_kwargs["disable_custom_all_reduce"] = True
+
+            self.llm = LLM(**llm_kwargs)
             
             self.sampling_params = SamplingParams(
                 temperature=self.config.temperature,
@@ -150,7 +177,13 @@ class VLLMEngine:
             self._initialized = True
             self._init_prefix_index()
             self._init_tokenizer()
-            logger.info(f"vLLM engine initialized with {self.config.model_name}")
+            logger.info(
+                "vLLM engine initialized with %s (tp=%s, eager=%s, max_model_len=%s)",
+                self.config.model_name,
+                self.config.tensor_parallel_size,
+                bool(llm_kwargs.get("enforce_eager", False)),
+                llm_kwargs.get("max_model_len"),
+            )
             
         except ImportError:
             raise ImportError("vLLM not installed. Install with: pip install vllm")
