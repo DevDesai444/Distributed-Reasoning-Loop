@@ -421,6 +421,9 @@ python main.py train --data-path ./synthetic_data/dpo_pairs.jsonl
 python main.py train-grpo --data-path ./synthetic_data/full_pairs.jsonl --epochs 1
 ```
 
+Use `--num-gpus auto` (default) to automatically use all visible GPUs, or set
+an explicit value such as `--num-gpus 2`.
+
 ### Evaluate a model
 
 ```bash
