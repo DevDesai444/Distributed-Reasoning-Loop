@@ -50,6 +50,27 @@ def cmd_train_grpo(args):
         train_grpo_from_synthetic_data,
     )
     import argparse
+
+    def _build_distributed_args(parsed_args):
+        forwarded = [
+            "--data-path", parsed_args.data_path,
+            "--output-dir", parsed_args.output_dir,
+            "--model-name", parsed_args.model,
+            "--num-epochs", str(parsed_args.epochs),
+            "--batch-size", str(parsed_args.batch_size),
+            "--group-size", str(parsed_args.group_size),
+            "--online-max-new-tokens", str(parsed_args.online_max_new_tokens),
+            "--online-temperature", str(parsed_args.online_temperature),
+            "--online-top-p", str(parsed_args.online_top_p),
+            "--online-resample-attempts", str(parsed_args.online_resample_attempts),
+            "--ray-verifier-workers", str(parsed_args.ray_verifier_workers),
+            "--num-gpus", str(parsed_args.num_gpus),
+        ]
+        if parsed_args.enable_ray_verification and not parsed_args.disable_ray_verification:
+            forwarded.append("--enable-ray-verification")
+        if parsed_args.disable_ray_verification:
+            forwarded.append("--disable-ray-verification")
+        return forwarded
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-path', type=str, required=True)
@@ -69,7 +90,9 @@ def cmd_train_grpo(args):
     
     grpo_args = parser.parse_args(args.remaining)
 
-    if maybe_launch_grpo_distributed(args.remaining, requested_num_gpus=grpo_args.num_gpus):
+    distributed_args = _build_distributed_args(grpo_args)
+
+    if maybe_launch_grpo_distributed(distributed_args, requested_num_gpus=grpo_args.num_gpus):
         return
     
     train_grpo_from_synthetic_data(
