@@ -4,6 +4,7 @@ Runtime helpers for model loading across GPU and CPU environments.
 
 import importlib.util
 import logging
+from functools import lru_cache
 from typing import Any
 
 import torch
@@ -11,9 +12,22 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+@lru_cache(maxsize=1)
 def bitsandbytes_available() -> bool:
-    """Return True when bitsandbytes can be imported."""
-    return importlib.util.find_spec("bitsandbytes") is not None
+    """Return True only when bitsandbytes is installed and its native backend loads."""
+    if importlib.util.find_spec("bitsandbytes") is None:
+        return False
+
+    try:
+        import bitsandbytes  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "bitsandbytes is installed but unavailable at runtime; disabling 8-bit loading: %s",
+            exc,
+        )
+        return False
+
+    return True
 
 
 def get_runtime_device() -> torch.device:
@@ -57,7 +71,7 @@ def build_causal_lm_load_kwargs(
                 )
         elif allow_8bit:
             logger.warning(
-                "bitsandbytes is not installed; falling back to standard precision model loading."
+                "8-bit loading unavailable; falling back to standard precision model loading."
             )
 
     return kwargs, use_8bit
