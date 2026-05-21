@@ -4,6 +4,7 @@ Runtime helpers for model loading across GPU and CPU environments.
 
 import importlib.util
 import logging
+import os
 from functools import lru_cache
 from typing import Any
 
@@ -15,15 +16,26 @@ logger = logging.getLogger(__name__)
 @lru_cache(maxsize=1)
 def bitsandbytes_available() -> bool:
     """Return True only when bitsandbytes is installed and its native backend loads."""
+    if os.getenv("DRL_DISABLE_8BIT", "").strip().lower() in {"1", "true", "yes", "on"}:
+        logger.info("8-bit loading disabled by DRL_DISABLE_8BIT.")
+        return False
+
     if importlib.util.find_spec("bitsandbytes") is None:
         return False
 
     try:
         import bitsandbytes  # noqa: F401
+        from bitsandbytes import cextension as bnb_cext
     except Exception as exc:
         logger.warning(
             "bitsandbytes is installed but unavailable at runtime; disabling 8-bit loading: %s",
             exc,
+        )
+        return False
+
+    if not getattr(bnb_cext, "COMPILED_WITH_CUDA", False):
+        logger.warning(
+            "bitsandbytes is installed but GPU quantization backend is unavailable; disabling 8-bit loading."
         )
         return False
 
