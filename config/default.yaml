@@ -3,9 +3,13 @@
 data_generator:
   teacher_model: "Qwen/Qwen2.5-7B-Instruct"
   student_model: "Qwen/Qwen2.5-7B-Instruct"
+  backend: "vllm"
+  tensor_parallel_size: "auto"
+  gpu_memory_utilization: 0.9
   num_cot_paths: 10
   max_new_tokens: 2048
   temperature: 0.8
+  top_p: 0.95
 
   datasets:
     math: "gsm8k"
