@@ -113,18 +113,29 @@ class RayMathVerificationPool:
             import ray
 
             self._ray = ray
+            ray_pythonpath = os.pathsep.join(
+                [str(_SRC_ROOT), os.environ.get("PYTHONPATH", "")]
+            ).rstrip(os.pathsep)
             if not ray.is_initialized():
                 ray.init(
                     ignore_reinit_error=True,
                     include_dashboard=False,
                     log_to_driver=False,
                     namespace="grpo_verification",
+                    runtime_env={"env_vars": {"PYTHONPATH": ray_pythonpath}},
                 )
 
             @ray.remote
             class _MathVerifierWorker:
                 def __init__(self):
-                    self.verifier = create_verifier("math")
+                    import sys
+
+                    if str(_SRC_ROOT) not in sys.path:
+                        sys.path.insert(0, str(_SRC_ROOT))
+
+                    from verifier import create_verifier as create_remote_verifier
+
+                    self.verifier = create_remote_verifier("math")
 
                 def verify(self, reasoning: str, expected_answer: str) -> str:
                     result = self.verifier.verify_reasoning_path(reasoning, expected_answer)
