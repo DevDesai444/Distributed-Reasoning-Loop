@@ -45,7 +45,10 @@ def cmd_train(args):
 
 def cmd_train_grpo(args):
     """Train model with GRPO."""
-    from src.training.grpo_trainer import train_grpo_from_synthetic_data
+    from src.training.grpo_trainer import (
+        maybe_launch_grpo_distributed,
+        train_grpo_from_synthetic_data,
+    )
     import argparse
     
     parser = argparse.ArgumentParser()
@@ -62,8 +65,12 @@ def cmd_train_grpo(args):
     parser.add_argument('--enable-ray-verification', action='store_true')
     parser.add_argument('--disable-ray-verification', action='store_true')
     parser.add_argument('--ray-verifier-workers', type=int, default=4)
+    parser.add_argument('--num-gpus', type=str, default='auto')
     
     grpo_args = parser.parse_args(args.remaining)
+
+    if maybe_launch_grpo_distributed(args.remaining, requested_num_gpus=grpo_args.num_gpus):
+        return
     
     train_grpo_from_synthetic_data(
         data_path=grpo_args.data_path,
