@@ -13,6 +13,7 @@ import sys
 import time
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -240,6 +241,7 @@ class GRPOConfig:
 
     bf16: bool = True
     gradient_checkpointing: bool = True
+    distributed_timeout_minutes: int = 120
 
     verifier_type: str = "math"
     verifier_timeout: int = 10
@@ -370,13 +372,17 @@ class ReasoningGRPOTrainer:
             backend = "gloo"
 
         if not dist.is_initialized():
-            dist.init_process_group(backend=backend)
+            dist.init_process_group(
+                backend=backend,
+                timeout=timedelta(minutes=max(1, self.config.distributed_timeout_minutes)),
+            )
         logger.info(
-            "Initialized distributed GRPO rank=%s local_rank=%s world_size=%s backend=%s",
+            "Initialized distributed GRPO rank=%s local_rank=%s world_size=%s backend=%s timeout_minutes=%s",
             self.rank,
             self.local_rank,
             self.world_size,
             backend,
+            self.config.distributed_timeout_minutes,
         )
 
     def _setup_verifier(self):
@@ -1191,6 +1197,7 @@ def train_grpo_from_synthetic_data(
     enable_ray_verification: bool = True,
     ray_verifier_workers: int = 4,
     verifier_type: str = "math",
+    distributed_timeout_minutes: int = 120,
 ):
     """Convenience entry point for GRPO training from a JSONL file."""
     data = []
@@ -1211,6 +1218,7 @@ def train_grpo_from_synthetic_data(
         enable_ray_verification=enable_ray_verification,
         ray_verifier_workers=ray_verifier_workers,
         verifier_type=verifier_type,
+        distributed_timeout_minutes=distributed_timeout_minutes,
     )
 
     trainer = ReasoningGRPOTrainer(config)
@@ -1248,6 +1256,7 @@ if __name__ == "__main__":
     parser.add_argument("--disable-ray-verification", action="store_true")
     parser.add_argument("--ray-verifier-workers", type=int, default=4)
     parser.add_argument("--verifier-type", type=str, default="math", choices=["math", "code"])
+    parser.add_argument("--distributed-timeout-minutes", type=int, default=120)
     parser.add_argument(
         "--num-gpus",
         type=str,
@@ -1292,4 +1301,5 @@ if __name__ == "__main__":
         enable_ray_verification=(False if args.disable_ray_verification else True if args.enable_ray_verification else True),
         ray_verifier_workers=args.ray_verifier_workers,
         verifier_type=args.verifier_type,
+        distributed_timeout_minutes=args.distributed_timeout_minutes,
     )
