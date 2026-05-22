@@ -12,6 +12,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+GSM8K_DATASET_ID = "openai/gsm8k"
+
 
 @dataclass
 class Problem:
@@ -82,7 +84,7 @@ class GSM8KLoader(DatasetLoader):
             from datasets import load_dataset
             
             dataset = load_dataset(
-                "gsm8k",
+                GSM8K_DATASET_ID,
                 "main",
                 split=self.split,
                 cache_dir=self.cache_dir,
