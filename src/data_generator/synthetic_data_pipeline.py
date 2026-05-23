@@ -120,6 +120,7 @@ class SyntheticDataPipeline:
         output_dir: str = "./synthetic_data",
         num_workers: int = 4,
         cache_dir: Optional[str] = None,
+        preprocess_config: Optional[PreprocessConfig] = None,
     ):
         self.generator_config = generator_config
         self.dataset_name = dataset_name
@@ -127,6 +128,13 @@ class SyntheticDataPipeline:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.num_workers = num_workers
         self.cache_dir = cache_dir
+        self.preprocess_config = preprocess_config or PreprocessConfig(
+            min_response_length=100,
+            max_response_length=8000,
+            dedup_threshold=0.85,
+            min_pair_diversity=0.2,
+            max_pairs_per_problem=5,
+        )
         
         # Initialize components
         self.generator = CoTGenerator(generator_config)
@@ -369,24 +377,29 @@ class SyntheticDataPipeline:
         
         # Final preprocessing and save
         logger.info("Running data preprocessing...")
-        preprocessor = DataPreprocessor(PreprocessConfig(
-            min_response_length=100,
-            max_response_length=8000,
-            dedup_threshold=0.85,
-            min_pair_diversity=0.2,
-            max_pairs_per_problem=5,
-        ))
+        preprocessor = DataPreprocessor(self.preprocess_config)
         
         # Convert to dicts for preprocessing
         sample_dicts = [s.to_dict() for s in all_samples]
         filtered_samples, smart_pairs = preprocessor.preprocess(sample_dicts, create_pairs=True)
+        pair_quality_summary = preprocessor.summarize_pairs(smart_pairs)
         
         # Convert back and update pairs
         logger.info(f"Preprocessing: {len(all_samples)} -> {len(filtered_samples)} samples")
         logger.info(f"Smart pairs created: {len(smart_pairs)}")
+        self.stats["preprocessed_samples"] = len(filtered_samples)
+        self.stats["smart_pairs_created"] = len(smart_pairs)
+        self.stats["pair_quality_summary"] = pair_quality_summary
         
         # Save with preprocessed data
-        self._save_results(all_samples, all_pairs, filtered_samples, smart_pairs)
+        self._save_results(
+            all_samples,
+            all_pairs,
+            filtered_samples,
+            smart_pairs,
+            preprocess_stats=preprocessor.get_stats(),
+            pair_quality_summary=pair_quality_summary,
+        )
         
         logger.info(f"Pipeline complete. Stats: {self.stats}")
         
@@ -416,6 +429,8 @@ class SyntheticDataPipeline:
         pairs: List[SamplePair],
         filtered_samples: List[Dict] = None,
         smart_pairs: List[Dict] = None,
+        preprocess_stats: Dict[str, Any] = None,
+        pair_quality_summary: Dict[str, Any] = None,
     ):
         """Save final results."""
         # Save all samples (raw)
@@ -440,6 +455,11 @@ class SyntheticDataPipeline:
                     "rejected": pair.get("rejected", ""),
                 }
                 f.write(json.dumps(dpo_pair) + "\n")
+
+        if smart_pairs:
+            with open(self.output_dir / "smart_pairs.jsonl", "w") as f:
+                for pair in smart_pairs:
+                    f.write(json.dumps(pair) + "\n")
         
         # Save full pairs with metadata
         with open(self.output_dir / "full_pairs.jsonl", "w") as f:
@@ -452,6 +472,12 @@ class SyntheticDataPipeline:
         # Save statistics
         with open(self.output_dir / "stats.json", "w") as f:
             json.dump(self.stats, f, indent=2)
+        if preprocess_stats:
+            with open(self.output_dir / "preprocess_stats.json", "w") as f:
+                json.dump(preprocess_stats, f, indent=2)
+        if pair_quality_summary:
+            with open(self.output_dir / "pair_quality_summary.json", "w") as f:
+                json.dump(pair_quality_summary, f, indent=2)
         
         # Save correct/incorrect samples separately
         correct = [s for s in samples if s.is_correct]
@@ -470,6 +496,7 @@ class SyntheticDataPipeline:
 
 def create_pipeline_from_config(config: Dict[str, Any]) -> SyntheticDataPipeline:
     """Create pipeline from configuration dictionary."""
+    preprocess_cfg = config.get("preprocessing", {})
     gen_config = GenerationConfig(
         model_name=config.get("teacher_model", "meta-llama/Llama-3-70B-Instruct"),
         num_paths=config.get("num_cot_paths", 10),
@@ -482,4 +509,5 @@ def create_pipeline_from_config(config: Dict[str, Any]) -> SyntheticDataPipeline
         dataset_name=config.get("dataset", "gsm8k"),
         output_dir=config.get("output_dir", "./synthetic_data"),
         cache_dir=config.get("cache_dir"),
+        preprocess_config=PreprocessConfig(**preprocess_cfg) if preprocess_cfg else None,
     )

@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
 from collections import defaultdict
 import random
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,9 @@ class PreprocessConfig:
     min_pair_diversity: float = 0.2
     max_pairs_per_problem: int = 5
     prefer_high_confidence: bool = True
+    require_answer_disagreement_for_pairs: bool = True
+    prioritize_step_aligned_pairs: bool = True
+    max_pairs_per_error_type: int = 2
     
     # Normalization
     normalize_whitespace: bool = True
@@ -52,6 +56,7 @@ class DataPreprocessor:
     def __init__(self, config: Optional[PreprocessConfig] = None):
         self.config = config or PreprocessConfig()
         self.stats = defaultdict(int)
+        self._numeric_pattern = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?(?:/\d+(?:\.\d+)?)?")
     
     def preprocess(
         self,
@@ -118,7 +123,77 @@ class DataPreprocessor:
             reasoning = re.sub(r'\[INST\].*?\[/INST\]', '', reasoning, flags=re.DOTALL)
         
         sample["reasoning"] = reasoning
+        sample["reasoning_step_count"] = self._estimate_step_count(reasoning)
+        sample["has_final_answer"] = self._has_final_answer(reasoning)
+        sample["answer_key"] = self._extract_answer_key(
+            sample.get("final_answer")
+            or sample.get("predicted")
+            or reasoning
+        )
+        sample["expected_answer_key"] = self._extract_answer_key(sample.get("expected_answer", ""))
         return sample
+
+    def _estimate_step_count(self, reasoning: str) -> int:
+        step_patterns = [
+            r'step\s*\d+',
+            r'\d+\)',
+            r'\d+\.',
+            r'first|second|third|then|next|finally|therefore',
+            r'let\'s|we can|we need|we have',
+        ]
+        return sum(
+            len(re.findall(pattern, reasoning, re.IGNORECASE))
+            for pattern in step_patterns
+        )
+
+    def _has_final_answer(self, reasoning: str) -> bool:
+        answer_patterns = [
+            r'(?:the\s+)?(?:final\s+)?answer\s*(?:is|:)',
+            r'(?:therefore|thus|so|hence)',
+            r'=\s*[\d.]+\s*$',
+            r'\\boxed\{',
+            r'####',
+        ]
+        return any(
+            re.search(pattern, reasoning, re.IGNORECASE | re.MULTILINE)
+            for pattern in answer_patterns
+        )
+
+    def _extract_answer_key(self, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        matches = self._numeric_pattern.findall(text.replace(",", ""))
+        if matches:
+            try:
+                numeric = matches[-1]
+                if "/" in numeric:
+                    numerator, denominator = numeric.split("/", 1)
+                    return f"{float(numerator) / float(denominator):.8f}".rstrip("0").rstrip(".")
+                return f"{float(numeric):.8f}".rstrip("0").rstrip(".")
+            except Exception:
+                return matches[-1]
+        normalized = re.sub(r"\s+", " ", text.lower()).strip(" .,!?:;`'\"")
+        return normalized or None
+
+    def _classify_failure_mode(self, sample: Dict[str, Any]) -> str:
+        reasoning = sample.get("reasoning", "")
+        answer_key = sample.get("answer_key")
+        expected_key = sample.get("expected_answer_key")
+
+        if not reasoning or len(reasoning.split()) < max(8, self.config.min_reasoning_tokens // 4):
+            return "trivial_short"
+        if not sample.get("has_final_answer", False):
+            return "missing_final_answer"
+        if self._is_repetitive(reasoning):
+            return "repetitive"
+        if answer_key and expected_key and answer_key != expected_key:
+            return "answer_mismatch"
+        if answer_key is None:
+            return "parse_like_failure"
+        return "reasoning_gap"
     
     def _quality_filter(self, samples: List[Dict]) -> List[Dict]:
         """Filter samples based on quality criteria."""
@@ -129,32 +204,14 @@ class DataPreprocessor:
             
             # Check minimum steps
             if self.config.min_step_count > 0:
-                step_patterns = [
-                    r'step\s*\d+', r'\d+\)', r'\d+\.', 
-                    r'first|second|third|then|next|finally',
-                    r'let\'s|we can|we need|we have'
-                ]
-                step_count = sum(
-                    len(re.findall(p, reasoning, re.IGNORECASE)) 
-                    for p in step_patterns
-                )
+                step_count = sample.get("reasoning_step_count", self._estimate_step_count(reasoning))
                 if step_count < self.config.min_step_count:
                     self.stats["filtered_no_steps"] += 1
                     continue
             
             # Check for final answer
             if self.config.require_final_answer:
-                answer_patterns = [
-                    r'(?:the\s+)?(?:final\s+)?answer\s*(?:is|:)',
-                    r'(?:therefore|thus|so|hence)',
-                    r'=\s*[\d.]+\s*$',
-                    r'\\boxed\{',
-                    r'####',
-                ]
-                has_answer = any(
-                    re.search(p, reasoning, re.IGNORECASE | re.MULTILINE)
-                    for p in answer_patterns
-                )
+                has_answer = sample.get("has_final_answer", self._has_final_answer(reasoning))
                 if not has_answer:
                     self.stats["filtered_no_answer"] += 1
                     continue
@@ -280,6 +337,45 @@ class DataPreprocessor:
         union = len(words1 | words2)
         
         return intersection / union if union > 0 else 0.0
+
+    def _pair_quality_score(self, pos: Dict[str, Any], neg: Dict[str, Any], diversity: float) -> float:
+        chosen_conf = float(pos.get("verification_confidence", 0.0))
+        rejected_conf = float(neg.get("verification_confidence", 0.0))
+        confidence_gap = max(0.0, chosen_conf - rejected_conf)
+
+        neg_step_count = float(neg.get("reasoning_step_count", 0))
+        pos_step_count = float(pos.get("reasoning_step_count", 0))
+        step_alignment = min(neg_step_count, pos_step_count) / max(pos_step_count, 1.0)
+
+        neg_error_type = self._classify_failure_mode(neg)
+        error_type_bonus = {
+            "answer_mismatch": 0.18,
+            "reasoning_gap": 0.12,
+            "parse_like_failure": -0.05,
+            "missing_final_answer": -0.10,
+            "trivial_short": -0.15,
+            "repetitive": -0.12,
+        }.get(neg_error_type, 0.0)
+
+        answer_disagreement = (
+            1.0
+            if neg.get("answer_key")
+            and pos.get("answer_key")
+            and neg.get("answer_key") != pos.get("answer_key")
+            else 0.0
+        )
+
+        final_answer_bonus = 0.08 if neg.get("has_final_answer", False) else -0.08
+
+        score = (
+            0.38 * diversity
+            + 0.22 * confidence_gap
+            + 0.14 * step_alignment
+            + 0.10 * answer_disagreement
+            + final_answer_bonus
+            + error_type_bonus
+        )
+        return float(score)
     
     def _create_smart_pairs(self, samples: List[Dict]) -> List[Dict]:
         """Create DPO pairs with smart selection."""
@@ -318,28 +414,96 @@ class DataPreprocessor:
                     neg_reasoning = neg.get("reasoning", "")
                     
                     diversity = 1 - self._jaccard_similarity(pos_reasoning, neg_reasoning)
-                    
-                    if diversity >= self.config.min_pair_diversity:
-                        pair = {
-                            "prompt": pos.get("problem", ""),
-                            "chosen": pos_reasoning,
-                            "rejected": neg_reasoning,
-                            "problem_id": problem_id,
-                            "diversity_score": diversity,
-                            "chosen_confidence": pos.get("verification_confidence", 0),
-                            "rejected_confidence": neg.get("verification_confidence", 0),
-                        }
-                        problem_pairs.append(pair)
-            
-            # Sort by diversity and take top N
-            problem_pairs.sort(key=lambda x: x["diversity_score"], reverse=True)
-            pairs.extend(problem_pairs[:self.config.max_pairs_per_problem])
+
+                    if diversity < self.config.min_pair_diversity:
+                        continue
+
+                    neg_error_type = self._classify_failure_mode(neg)
+                    if (
+                        self.config.require_answer_disagreement_for_pairs
+                        and pos.get("answer_key")
+                        and neg.get("answer_key")
+                        and pos.get("answer_key") == neg.get("answer_key")
+                    ):
+                        self.stats["pairs_rejected_same_answer"] += 1
+                        continue
+
+                    if (
+                        self.config.prioritize_step_aligned_pairs
+                        and neg.get("reasoning_step_count", 0) == 0
+                        and neg_error_type in {"trivial_short", "missing_final_answer", "repetitive"}
+                    ):
+                        self.stats["pairs_rejected_unstructured_negative"] += 1
+                        continue
+
+                    pair_quality = self._pair_quality_score(pos, neg, diversity)
+                    pair = {
+                        "prompt": pos.get("problem", ""),
+                        "chosen": pos_reasoning,
+                        "rejected": neg_reasoning,
+                        "problem_id": problem_id,
+                        "diversity_score": diversity,
+                        "pair_quality_score": pair_quality,
+                        "chosen_confidence": pos.get("verification_confidence", 0),
+                        "rejected_confidence": neg.get("verification_confidence", 0),
+                        "chosen_answer": pos.get("final_answer"),
+                        "rejected_answer": neg.get("final_answer"),
+                        "expected_answer": pos.get("expected_answer"),
+                        "chosen_step_count": pos.get("reasoning_step_count", 0),
+                        "rejected_step_count": neg.get("reasoning_step_count", 0),
+                        "rejected_error_type": neg_error_type,
+                    }
+                    problem_pairs.append(pair)
+
+            by_error_type = defaultdict(list)
+            for pair in problem_pairs:
+                by_error_type[pair["rejected_error_type"]].append(pair)
+
+            selected_pairs: List[Dict[str, Any]] = []
+            for error_type, bucket in by_error_type.items():
+                bucket.sort(
+                    key=lambda pair: (pair["pair_quality_score"], pair["diversity_score"]),
+                    reverse=True,
+                )
+                selected_pairs.extend(bucket[: self.config.max_pairs_per_error_type])
+
+            selected_pairs.sort(
+                key=lambda pair: (pair["pair_quality_score"], pair["diversity_score"]),
+                reverse=True,
+            )
+            pairs.extend(selected_pairs[: self.config.max_pairs_per_problem])
         
         return pairs
     
     def get_stats(self) -> Dict[str, int]:
         """Return preprocessing statistics."""
         return dict(self.stats)
+
+    def summarize_pairs(self, pairs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Summarize the shape and quality of generated preference pairs."""
+        if not pairs:
+            return {
+                "pair_count": 0,
+                "avg_diversity_score": 0.0,
+                "avg_pair_quality_score": 0.0,
+                "error_type_counts": {},
+            }
+
+        error_type_counts = defaultdict(int)
+        diversity_scores: List[float] = []
+        pair_quality_scores: List[float] = []
+
+        for pair in pairs:
+            error_type_counts[pair.get("rejected_error_type", "unknown")] += 1
+            diversity_scores.append(float(pair.get("diversity_score", 0.0)))
+            pair_quality_scores.append(float(pair.get("pair_quality_score", 0.0)))
+
+        return {
+            "pair_count": len(pairs),
+            "avg_diversity_score": sum(diversity_scores) / len(diversity_scores),
+            "avg_pair_quality_score": sum(pair_quality_scores) / len(pair_quality_scores),
+            "error_type_counts": dict(error_type_counts),
+        }
 
 
 def preprocess_jsonl(

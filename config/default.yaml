@@ -19,6 +19,23 @@ data_generator:
     code_timeout: 10
     math_timeout: 10
 
+  preprocessing:
+    min_reasoning_tokens: 50
+    max_reasoning_tokens: 2048
+    min_response_length: 100
+    max_response_length: 8000
+    min_step_count: 2
+    require_final_answer: true
+    filter_repetitive: true
+    max_repetition_ratio: 0.3
+    dedup_threshold: 0.85
+    min_pair_diversity: 0.2
+    max_pairs_per_problem: 5
+    prefer_high_confidence: true
+    require_answer_disagreement_for_pairs: true
+    prioritize_step_aligned_pairs: true
+    max_pairs_per_error_type: 2
+
 verifier:
   type: "math"  # math or code
   math:
@@ -63,7 +80,12 @@ training:
     kl_threshold: 0.1
     eval_interval_steps: 50
     heldout_eval_size: 20
+    heldout_dataset: "gsm8k"
     eval_max_new_tokens: 256
+    save_best_checkpoint: true
+    best_checkpoint_metric: "pass_at_1"
+    min_eval_improvement: 0.0001
+    early_stop_patience: 3
     online_max_new_tokens: 256
     online_temperature: 0.8
     online_top_p: 0.95

@@ -13,7 +13,7 @@ from typing import Any
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from data_generator import SyntheticDataPipeline, GenerationConfig
+from data_generator import SyntheticDataPipeline, GenerationConfig, PreprocessConfig
 from omegaconf import OmegaConf
 
 logging.basicConfig(
@@ -165,6 +165,12 @@ def main():
         generator_config=gen_config,
         dataset_name=args.dataset,
         output_dir=args.output_dir,
+        preprocess_config=PreprocessConfig(
+            **OmegaConf.to_container(
+                data_cfg.get("preprocessing", {}),
+                resolve=True,
+            )
+        ) if data_cfg.get("preprocessing") else None,
     )
     
     # Run pipeline

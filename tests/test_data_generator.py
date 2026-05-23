@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from data_generator import CoTGenerator, GenerationConfig, ReasoningPath
 from data_generator.cot_generator import InferenceBackend
+from data_generator.data_preprocessor import DataPreprocessor, PreprocessConfig
 from data_generator.dataset_loader import GSM8KLoader, HumanEvalLoader, Problem
 
 
@@ -58,6 +59,62 @@ class TestPromptFormatting:
         monkeypatch.setattr(generator, "_get_formatter_tokenizer", lambda: DummyTokenizer())
         prompt = generator._format_prompt("What is 2+2?")
         assert prompt == "formatted-with-chat-template"
+
+
+class TestPreprocessorQuality:
+    """Tests for supervision-quality pair selection."""
+
+    def test_preprocessor_prefers_informative_negative_pairs(self):
+        preprocessor = DataPreprocessor(
+            PreprocessConfig(
+                min_reasoning_tokens=1,
+                min_response_length=1,
+                min_step_count=0,
+                max_pairs_per_problem=3,
+                max_pairs_per_error_type=2,
+            )
+        )
+
+        samples = [
+            {
+                "problem_id": "gsm8k_test_0",
+                "problem": "What is 2+2?",
+                "reasoning": "First add the two numbers. Then compute 2 + 2 = 4. #### 4",
+                "final_answer": "4",
+                "expected_answer": "4",
+                "is_correct": True,
+                "verification_confidence": 1.0,
+            },
+            {
+                "problem_id": "gsm8k_test_0",
+                "problem": "What is 2+2?",
+                "reasoning": "Add 2 and 2 carefully. This gives 5 because I made a mistake. #### 5",
+                "final_answer": "5",
+                "expected_answer": "4",
+                "is_correct": False,
+                "verification_confidence": 0.0,
+            },
+            {
+                "problem_id": "gsm8k_test_0",
+                "problem": "What is 2+2?",
+                "reasoning": "4",
+                "final_answer": "",
+                "expected_answer": "4",
+                "is_correct": False,
+                "verification_confidence": 0.0,
+            },
+        ]
+
+        _, pairs = preprocessor.preprocess(samples, create_pairs=True)
+
+        assert len(pairs) == 1
+        assert pairs[0]["rejected_answer"] == "5"
+        assert pairs[0]["rejected_error_type"] == "answer_mismatch"
+        assert pairs[0]["pair_quality_score"] > 0
+
+        summary = preprocessor.summarize_pairs(pairs)
+        assert summary["pair_count"] == 1
+        assert summary["error_type_counts"]["answer_mismatch"] == 1
 
 
 class TestReasoningPath:
