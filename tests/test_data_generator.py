@@ -159,6 +159,53 @@ class TestPreprocessorQuality:
 
         assert pairs == []
 
+    def test_preprocessor_limits_chosen_reasoning_reuse(self):
+        preprocessor = DataPreprocessor(
+            PreprocessConfig(
+                min_reasoning_tokens=1,
+                min_response_length=1,
+                min_step_count=0,
+                max_pairs_per_problem=5,
+                max_pairs_per_error_type=5,
+                max_pairs_per_chosen=1,
+                min_pair_quality_score=0.0,
+            )
+        )
+
+        samples = [
+            {
+                "problem_id": "gsm8k_test_2",
+                "problem": "What is 4+4?",
+                "reasoning": "First add 4 and 4. Then conclude 8. #### 8",
+                "final_answer": "8",
+                "expected_answer": "8",
+                "is_correct": True,
+                "verification_confidence": 1.0,
+            },
+            {
+                "problem_id": "gsm8k_test_2",
+                "problem": "What is 4+4?",
+                "reasoning": "First add the numbers and wrongly get 7. #### 7",
+                "final_answer": "7",
+                "expected_answer": "8",
+                "is_correct": False,
+                "verification_confidence": 0.1,
+            },
+            {
+                "problem_id": "gsm8k_test_2",
+                "problem": "What is 4+4?",
+                "reasoning": "First add the numbers and wrongly get 9. #### 9",
+                "final_answer": "9",
+                "expected_answer": "8",
+                "is_correct": False,
+                "verification_confidence": 0.1,
+            },
+        ]
+
+        _, pairs = preprocessor.preprocess(samples, create_pairs=True)
+
+        assert len(pairs) == 1
+
 
 class TestReasoningPath:
     """Tests for ReasoningPath."""

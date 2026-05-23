@@ -385,6 +385,17 @@ class SyntheticDataPipeline:
         filtered_samples, smart_pairs = preprocessor.preprocess(sample_dicts, create_pairs=True)
         pair_quality_summary = preprocessor.summarize_pairs(smart_pairs)
         sample_quality_summary = preprocessor.summarize_samples(filtered_samples)
+        covered_problem_ids = {pair.get("problem_id") for pair in smart_pairs if pair.get("problem_id")}
+        total_problem_ids = {sample.get("problem_id") for sample in filtered_samples if sample.get("problem_id")}
+        pair_coverage_summary = {
+            "covered_problem_count": len(covered_problem_ids),
+            "total_problem_count": len(total_problem_ids),
+            "covered_problem_fraction": (
+                len(covered_problem_ids) / len(total_problem_ids)
+                if total_problem_ids
+                else 0.0
+            ),
+        }
         
         # Convert back and update pairs
         logger.info(f"Preprocessing: {len(all_samples)} -> {len(filtered_samples)} samples")
@@ -393,6 +404,7 @@ class SyntheticDataPipeline:
         self.stats["smart_pairs_created"] = len(smart_pairs)
         self.stats["pair_quality_summary"] = pair_quality_summary
         self.stats["sample_quality_summary"] = sample_quality_summary
+        self.stats["pair_coverage_summary"] = pair_coverage_summary
         
         # Save with preprocessed data
         self._save_results(
@@ -403,6 +415,7 @@ class SyntheticDataPipeline:
             preprocess_stats=preprocessor.get_stats(),
             pair_quality_summary=pair_quality_summary,
             sample_quality_summary=sample_quality_summary,
+            pair_coverage_summary=pair_coverage_summary,
         )
         
         logger.info(f"Pipeline complete. Stats: {self.stats}")
@@ -446,6 +459,7 @@ class SyntheticDataPipeline:
         preprocess_stats: Dict[str, Any] = None,
         pair_quality_summary: Dict[str, Any] = None,
         sample_quality_summary: Dict[str, Any] = None,
+        pair_coverage_summary: Dict[str, Any] = None,
     ):
         """Save final results."""
         # Save all samples (raw)
@@ -496,6 +510,9 @@ class SyntheticDataPipeline:
         if sample_quality_summary:
             with open(self.output_dir / "sample_quality_summary.json", "w") as f:
                 json.dump(sample_quality_summary, f, indent=2)
+        if pair_coverage_summary:
+            with open(self.output_dir / "pair_coverage_summary.json", "w") as f:
+                json.dump(pair_coverage_summary, f, indent=2)
         
         # Save correct/incorrect samples separately
         correct = [s for s in samples if s.is_correct]

@@ -35,6 +35,7 @@ data_generator:
     require_answer_disagreement_for_pairs: true
     prioritize_step_aligned_pairs: true
     max_pairs_per_error_type: 2
+    max_pairs_per_chosen: 2
     min_chosen_confidence: 0.5
     min_negative_step_ratio: 0.5
     min_pair_quality_score: 0.05

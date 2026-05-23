@@ -41,6 +41,7 @@ class PreprocessConfig:
     require_answer_disagreement_for_pairs: bool = True
     prioritize_step_aligned_pairs: bool = True
     max_pairs_per_error_type: int = 2
+    max_pairs_per_chosen: int = 2
     min_chosen_confidence: float = 0.5
     min_negative_step_ratio: float = 0.5
     min_pair_quality_score: float = 0.05
@@ -492,7 +493,17 @@ class DataPreprocessor:
                 key=lambda pair: (pair["pair_quality_score"], pair["diversity_score"]),
                 reverse=True,
             )
-            pairs.extend(selected_pairs[: self.config.max_pairs_per_problem])
+            chosen_counts = defaultdict(int)
+            bounded_pairs = []
+            for pair in selected_pairs:
+                chosen_key = hashlib.md5(pair["chosen"].encode("utf-8")).hexdigest()
+                if chosen_counts[chosen_key] >= self.config.max_pairs_per_chosen:
+                    self.stats["pairs_rejected_chosen_reuse"] += 1
+                    continue
+                chosen_counts[chosen_key] += 1
+                bounded_pairs.append(pair)
+
+            pairs.extend(bounded_pairs[: self.config.max_pairs_per_problem])
         
         return pairs
     
