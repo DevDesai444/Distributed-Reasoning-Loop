@@ -441,11 +441,13 @@ class SyntheticDataPipeline:
                 f.write(json.dumps(pair.to_dict()) + "\n")
 
     def _save_problem_manifest(self, problems: List[Problem]) -> None:
+        problem_ids = [problem.id for problem in problems]
         manifest = {
             "dataset": self.dataset_name,
             "split": getattr(self.dataset_loader, "split", None),
             "problem_count": len(problems),
-            "problem_ids": [problem.id for problem in problems],
+            "problem_ids": problem_ids,
+            "problem_id_hash": hashlib.md5("\n".join(problem_ids).encode("utf-8")).hexdigest(),
         }
         with open(self.output_dir / "problem_manifest.json", "w") as handle:
             json.dump(manifest, handle, indent=2)
