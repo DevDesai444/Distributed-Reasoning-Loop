@@ -351,16 +351,12 @@ Explain your approach, then provide the complete solution in a Python code block
         import requests
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        system_prompt = self.MATH_SYSTEM_PROMPT if problem_type == "math" else self.CODE_SYSTEM_PROMPT
         results = {prob["id"]: [] for prob in problems}
         
         url = "http://127.0.0.1:30000/v1/chat/completions"
         
         def make_request(prob, path_idx):
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prob["problem"]}
-            ]
+            messages = self._build_messages(prob["problem"], problem_type)
             response = requests.post(url, json={
                 "model": self.config.model_name,
                 "messages": messages,

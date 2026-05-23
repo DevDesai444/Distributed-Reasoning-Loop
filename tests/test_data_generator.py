@@ -8,7 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from data_generator import GenerationConfig, ReasoningPath
+from data_generator import CoTGenerator, GenerationConfig, ReasoningPath
+from data_generator.cot_generator import InferenceBackend
 from data_generator.dataset_loader import GSM8KLoader, HumanEvalLoader, Problem
 
 
@@ -32,6 +33,31 @@ class TestGenerationConfig:
         assert config.model_name == "test-model"
         assert config.num_paths == 5
         assert config.temperature == 0.5
+
+
+class TestPromptFormatting:
+    """Tests for prompt construction behavior."""
+
+    def test_format_prompt_prefers_chat_template(self, monkeypatch):
+        """Inference prompt formatting should use the model chat template when available."""
+        generator = CoTGenerator(
+            GenerationConfig(
+                model_name="test-model",
+                backend=InferenceBackend.VLLM,
+            )
+        )
+
+        class DummyTokenizer:
+            def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+                assert tokenize is False
+                assert add_generation_prompt is True
+                assert messages[0]["role"] == "system"
+                assert messages[-1]["role"] == "user"
+                return "formatted-with-chat-template"
+
+        monkeypatch.setattr(generator, "_get_formatter_tokenizer", lambda: DummyTokenizer())
+        prompt = generator._format_prompt("What is 2+2?")
+        assert prompt == "formatted-with-chat-template"
 
 
 class TestReasoningPath:
