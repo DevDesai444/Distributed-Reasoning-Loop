@@ -117,14 +117,32 @@ def resolve_evaluation_model_path(config, model_path: str) -> tuple[str, Dict[st
     }
     model_dir = Path(model_path)
     best_checkpoint_dir = model_dir / "best_checkpoint"
+    selection_state_path = model_dir / "checkpoint_selection.json"
+
+    selection_state: Dict[str, Any] = {}
+    if selection_state_path.exists():
+        try:
+            with open(selection_state_path) as handle:
+                selection_state = json.load(handle)
+        except Exception as exc:
+            logger.warning("Unable to read checkpoint selection state from %s: %s", selection_state_path, exc)
 
     if (
         bool(config.training.grpo.get("save_best_checkpoint", False))
         and best_checkpoint_dir.exists()
+        and selection_state.get("best_eval_step") is not None
     ):
         metadata["selected_model_path"] = str(best_checkpoint_dir)
         metadata["selection_reason"] = "best_checkpoint"
+        metadata["selection_metric"] = selection_state.get("best_checkpoint_metric")
+        metadata["selection_score"] = selection_state.get("best_eval_score")
+        metadata["selection_step"] = selection_state.get("best_eval_step")
         return str(best_checkpoint_dir), metadata
+
+    if selection_state:
+        metadata["selection_metric"] = selection_state.get("best_checkpoint_metric")
+        metadata["selection_score"] = selection_state.get("best_eval_score")
+        metadata["selection_step"] = selection_state.get("best_eval_step")
 
     return model_path, metadata
 
@@ -374,6 +392,8 @@ def run_evaluation(config, model_path, args):
     # Save results
     for name, result in results.items():
         result.save(f"{config.general.output_dir}/{name}_results.json")
+    with open(f"{config.general.output_dir}/evaluation_selection.json", "w") as handle:
+        json.dump(selection_metadata, handle, indent=2)
     
     return results, selection_metadata
 

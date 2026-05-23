@@ -493,6 +493,15 @@ def test_pipeline_prefers_best_checkpoint_for_final_evaluation(monkeypatch, tmp_
             best_dir = output_dir / "best_checkpoint"
             best_dir.mkdir(parents=True, exist_ok=True)
             (best_dir / "best_marker.txt").write_text("best")
+            (output_dir / "checkpoint_selection.json").write_text(
+                json.dumps(
+                    {
+                        "best_eval_score": 0.75,
+                        "best_eval_step": 10,
+                        "best_checkpoint_metric": "pass_at_1",
+                    }
+                )
+            )
 
     fake_grpo_trainer.GRPOConfig = FakeGRPOConfig
     fake_grpo_trainer.ReasoningGRPOTrainer = FakeReasoningGRPOTrainer
@@ -614,3 +623,40 @@ def test_pipeline_prefers_best_checkpoint_for_final_evaluation(monkeypatch, tmp_
 
     assert state["eval_model_name"] is not None
     assert state["eval_model_name"].endswith("best_checkpoint")
+
+
+def test_resolve_evaluation_model_path_carries_checkpoint_selection_metadata(tmp_path):
+    pipeline_module = _load_run_pipeline_module()
+    config = OmegaConf.create(
+        {
+            "training": {
+                "grpo": {
+                    "save_best_checkpoint": True,
+                }
+            }
+        }
+    )
+
+    model_dir = tmp_path / "grpo_model"
+    best_dir = model_dir / "best_checkpoint"
+    best_dir.mkdir(parents=True)
+    (model_dir / "checkpoint_selection.json").write_text(
+        json.dumps(
+            {
+                "best_eval_score": 0.74,
+                "best_eval_step": 120,
+                "best_checkpoint_metric": "pass_at_1",
+            }
+        )
+    )
+
+    selected_path, metadata = pipeline_module.resolve_evaluation_model_path(
+        config,
+        str(model_dir),
+    )
+
+    assert selected_path == str(best_dir)
+    assert metadata["selection_reason"] == "best_checkpoint"
+    assert metadata["selection_metric"] == "pass_at_1"
+    assert metadata["selection_score"] == 0.74
+    assert metadata["selection_step"] == 120
