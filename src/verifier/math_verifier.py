@@ -47,7 +47,63 @@ class MathVerifier:
         self.tolerance = tolerance
         self.timeout = timeout
         self.transformations = standard_transformations + (implicit_multiplication_application,)
-        
+        self._numeric_pattern = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?(?:/\d+(?:\.\d+)?)?")
+
+    def _strip_generation_artifacts(self, text: str) -> str:
+        """Remove common chat-template and generation artifacts."""
+        if text is None:
+            return ""
+
+        cleaned = str(text)
+        cleaned = re.sub(r"<\|[^>]+?\|>", " ", cleaned)
+        cleaned = re.sub(r"\[/?INST\]", " ", cleaned)
+        cleaned = cleaned.replace("</s>", " ")
+        cleaned = re.sub(r"`{3,}", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return cleaned.strip()
+
+    def _extract_last_numeric_candidate(self, text: str) -> Optional[str]:
+        """Extract the last numeric-looking answer from free-form text."""
+        if not text:
+            return None
+
+        sanitized = self._strip_generation_artifacts(text)
+        sanitized = re.sub(r"\\text\{[^}]*\}", " ", sanitized)
+        matches = self._numeric_pattern.findall(sanitized)
+        if not matches:
+            return None
+        return matches[-1].replace(",", "")
+
+    def _clean_candidate_answer(self, answer: str) -> Optional[str]:
+        """Normalize raw regex captures into usable answer strings."""
+        if answer is None:
+            return None
+
+        cleaned = self._strip_generation_artifacts(answer)
+        cleaned = cleaned.strip(" \t\n\r`*$:;,.!?\"'()[]{}")
+        cleaned = re.sub(
+            r"^(?:the\s+)?(?:final\s+)?answer(?:\s+is)?[:\s-]*",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        ).strip()
+        cleaned = re.sub(r"^#+\s*", "", cleaned).strip()
+
+        if not cleaned or re.fullmatch(r"[|#:\-]+", cleaned):
+            return None
+
+        # Preserve structured assignments like x=2, y=-3.
+        if "=" in cleaned and re.search(r"[a-zA-Z_]", cleaned):
+            return cleaned
+
+        numeric_candidate = self._extract_last_numeric_candidate(cleaned)
+        if numeric_candidate is not None:
+            return numeric_candidate
+
+        if len(cleaned.split()) > 8:
+            return None
+        return cleaned
+
     def extract_final_answer(self, text: str) -> Optional[str]:
         """
         Extract the final answer from a reasoning path.
@@ -101,7 +157,7 @@ class MathVerifier:
         if answer is None:
             return ""
         
-        answer = str(answer).strip()
+        answer = self._strip_generation_artifacts(str(answer)).strip()
         
         # Remove currency symbols and units
         answer = re.sub(r'[\$£€]', '', answer)
@@ -116,6 +172,7 @@ class MathVerifier:
         # Remove LaTeX formatting
         answer = re.sub(r'\\[a-zA-Z]+', '', answer)
         answer = answer.replace('{', '').replace('}', '')
+        answer = answer.strip(" \t\n\r`*$:;,.!?\"'")
         
         return answer.strip()
     
