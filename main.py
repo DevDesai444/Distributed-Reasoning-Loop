@@ -163,9 +163,9 @@ Examples:
     
   Evaluate model:
     python main.py evaluate --model ./dpo_output --benchmark gsm8k --use-ttc
-    
+
   Run full pipeline:
-    python main.py pipeline --dataset gsm8k --subset-size 100
+    python main.py pipeline --dataset gsm8k --subset-size 100 --training-method best
     
   Start inference server:
     python main.py serve --model ./dpo_output --port 8000

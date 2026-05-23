@@ -430,11 +430,23 @@ an explicit value such as `--num-gpus 2`.
 python main.py evaluate --model ./grpo_output --benchmark gsm8k
 ```
 
+For honest multi-sample evaluation, add `--use-ttc`. The default TTC path now
+uses consensus-style answer aggregation without looking at the ground-truth
+answer. If you explicitly want oracle verifier reranking for analysis, pass
+`--ttc-oracle-verify` and treat that result as diagnostic rather than a
+benchmark number.
+
 ### Run the full pipeline
 
 ```bash
-python main.py pipeline --dataset gsm8k --subset-size 100
+python main.py pipeline --dataset gsm8k --subset-size 100 --training-method best
 ```
+
+`best` runs the strongest built-in training path:
+
+1. SFT on verifier-approved correct traces
+2. DPO on preference pairs
+3. GRPO online refinement from the DPO checkpoint
 
 ### Launch serving
 
