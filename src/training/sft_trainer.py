@@ -9,6 +9,8 @@ from typing import List, Optional, Dict, Any
 from pathlib import Path
 import torch
 
+from prompting import format_conversation
+
 from .runtime_utils import (
     build_causal_lm_load_kwargs,
     get_runtime_dtype,
@@ -34,6 +36,7 @@ class SFTTrainerConfig:
     
     # Sequence length
     max_length: int = 2048
+    problem_type: str = "math"
     
     # LoRA (optional)
     use_lora: bool = True
@@ -128,20 +131,13 @@ class ReasoningSFTTrainer:
         """Format a single example for training."""
         prompt = example.get("prompt", example.get("problem", ""))
         response = example.get("response", example.get("reasoning", ""))
-        
-        # Use chat template if available
-        if hasattr(self.tokenizer, "apply_chat_template"):
-            messages = [
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": response},
-            ]
-            return self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-        
-        return f"User: {prompt}\n\nAssistant: {response}"
+
+        return format_conversation(
+            self.tokenizer,
+            prompt,
+            response,
+            problem_type=self.config.problem_type,
+        )
     
     def train(
         self,
