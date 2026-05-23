@@ -699,6 +699,16 @@ def main():
     }
     with open(Path(config.general.output_dir) / "pipeline_summary.json", "w") as f:
         json.dump(summary, f, indent=2)
+    comparison = run_artifacts.compare_summary_to_previous(summary)
+    if comparison is not None:
+        comparison_path = Path(config.general.output_dir) / "comparison_to_previous.json"
+        with open(comparison_path, "w") as handle:
+            json.dump(comparison, handle, indent=2)
+        run_artifacts.record_artifact(
+            stage="pipeline",
+            name="comparison_to_previous",
+            path=comparison_path,
+        )
     run_artifacts.record_artifact(
         stage="pipeline",
         name="pipeline_summary",
