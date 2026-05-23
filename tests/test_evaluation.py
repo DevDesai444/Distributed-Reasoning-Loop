@@ -262,3 +262,4 @@ def test_gsm8k_evaluator_records_problem_manifest_metadata(monkeypatch):
     assert result.metadata["split"] == "test"
     assert result.metadata["subset_size"] == 1
     assert result.metadata["problem_ids"] == ["gsm8k_test_0"]
+    assert len(result.metadata["problem_id_hash"]) == 32

@@ -4,6 +4,7 @@ Supports GSM8K, HumanEval, and MATH benchmarks.
 """
 
 import json
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Tuple
@@ -13,6 +14,14 @@ import time
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+
+def _problem_id_manifest(problems) -> Dict[str, Any]:
+    problem_ids = [problem.id for problem in problems]
+    return {
+        "problem_ids": problem_ids,
+        "problem_id_hash": hashlib.md5("\n".join(problem_ids).encode("utf-8")).hexdigest(),
+    }
 
 
 @dataclass
@@ -251,7 +260,7 @@ class GSM8KEvaluator(BaseEvaluator):
                 "benchmark": self.BENCHMARK_NAME,
                 "split": split,
                 "subset_size": subset_size,
-                "problem_ids": [problem.id for problem in problems],
+                **_problem_id_manifest(problems),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             },
         )
@@ -370,7 +379,7 @@ class HumanEvalEvaluator(BaseEvaluator):
                 **self.run_metadata,
                 "benchmark": self.BENCHMARK_NAME,
                 "subset_size": subset_size,
-                "problem_ids": [problem.id for problem in problems],
+                **_problem_id_manifest(problems),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             },
         )
@@ -506,7 +515,7 @@ class MATHEvaluator(BaseEvaluator):
                 "difficulty": difficulty,
                 "subject": subject,
                 "subset_size": subset_size,
-                "problem_ids": [problem.id for problem in problems],
+                **_problem_id_manifest(problems),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             },
         )
