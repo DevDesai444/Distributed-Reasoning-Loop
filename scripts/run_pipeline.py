@@ -16,6 +16,7 @@ from typing import Any, Dict, Tuple
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from omegaconf import OmegaConf
+from component_registry import component_registry_for_policy
 from run_artifacts import RunArtifacts
 from tracks import apply_track_policy
 from wandb_utils import ensure_wandb_run, get_wandb
@@ -528,6 +529,16 @@ def main():
         )
     else:
         run_artifacts.add_note("Running core reasoning loop without optional tracks.")
+    component_registry = component_registry_for_policy(track_policy)
+    component_registry_path = Path(config.general.output_dir) / "component_registry.json"
+    with open(component_registry_path, "w") as handle:
+        json.dump(component_registry, handle, indent=2)
+    run_artifacts.record_artifact(
+        stage="pipeline",
+        name="component_registry",
+        path=component_registry_path,
+        metadata={"enabled_optional_tracks": enabled_tracks},
+    )
 
     if config.training.wandb.enabled:
         config_payload = OmegaConf.to_container(config, resolve=True)
