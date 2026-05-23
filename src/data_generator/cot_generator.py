@@ -12,6 +12,8 @@ import json
 import hashlib
 import asyncio
 
+from prompting import build_messages, format_prompt
+
 logger = logging.getLogger(__name__)
 
 
@@ -102,14 +104,6 @@ class CoTGenerator:
     Supports vLLM and SGLang backends for efficient inference.
     """
     
-    MATH_SYSTEM_PROMPT = """You are a helpful math tutor. Solve the following problem step by step.
-Show your work clearly, explaining each step of your reasoning.
-At the end, provide your final answer after '#### '."""
-
-    CODE_SYSTEM_PROMPT = """You are an expert programmer. Solve the following coding problem.
-Think through the problem step by step before writing code.
-Explain your approach, then provide the complete solution in a Python code block."""
-
     def __init__(self, config: GenerationConfig):
         self.config = config
         self.model = None
@@ -215,20 +209,11 @@ Explain your approach, then provide the complete solution in a Python code block
         few_shot_examples: Optional[List[Dict[str, str]]] = None,
     ) -> List[Dict[str, str]]:
         """Build chat-style messages for inference backends."""
-        if problem_type == "math":
-            system = self.MATH_SYSTEM_PROMPT
-        else:
-            system = self.CODE_SYSTEM_PROMPT
-        
-        messages = [{"role": "system", "content": system}]
-        
-        if few_shot_examples:
-            for example in few_shot_examples:
-                messages.append({"role": "user", "content": example["problem"]})
-                messages.append({"role": "assistant", "content": example["solution"]})
-
-        messages.append({"role": "user", "content": problem})
-        return messages
+        return build_messages(
+            problem,
+            problem_type=problem_type,
+            few_shot_examples=few_shot_examples,
+        )
 
     def _get_formatter_tokenizer(self):
         """
@@ -267,37 +252,26 @@ Explain your approach, then provide the complete solution in a Python code block
         few_shot_examples: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         """Format the prompt with system instruction and optional few-shot examples."""
-        messages = self._build_messages(problem, problem_type, few_shot_examples)
-
         formatter_tokenizer = self._get_formatter_tokenizer()
-        if formatter_tokenizer is not None:
-            try:
-                return formatter_tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Chat template formatting failed for %s, using manual fallback: %s",
-                    self.config.model_name,
-                    exc,
-                )
-
-        # Manual fallback for models without a usable chat template.
-        formatted = ""
-        for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
-            if role == "system":
-                formatted += f"<|system|>\n{content}\n"
-            elif role == "user":
-                formatted += f"<|user|>\n{content}\n"
-            elif role == "assistant":
-                formatted += f"<|assistant|>\n{content}\n"
-        formatted += "<|assistant|>\n"
-        
-        return formatted
+        try:
+            return format_prompt(
+                formatter_tokenizer,
+                problem,
+                problem_type=problem_type,
+                few_shot_examples=few_shot_examples,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Chat template formatting failed for %s, using manual fallback: %s",
+                self.config.model_name,
+                exc,
+            )
+            return format_prompt(
+                None,
+                problem,
+                problem_type=problem_type,
+                few_shot_examples=few_shot_examples,
+            )
     
     def generate_paths_vllm(
         self,
