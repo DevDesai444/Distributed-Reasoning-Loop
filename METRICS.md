@@ -1,39 +1,65 @@
+# Metrics
 
-## 📊 Evaluation Results
+This file tracks the most important benchmark checkpoints for the project and
+documents how to interpret evaluation artifacts.
 
-### Model Comparison: Base vs GRPO Fine-tuned
+## Current Checkpoints
 
-| Metric | Base Model | Fine-tuned | Improvement |
-|--------|-----------|------------|-------------|
-| Pass@1 | 96.0% | 100.0% | +4.0% |
-| Pass@4 | 100.0% | 100.0% | 0.0% |
-| Pass@8 | 100.0% | 100.0% | 0.0% |
-| Avg Response Length | 97 chars | 272 chars | - |
-| Avg Reasoning Steps | 1.7 | 4.8 | - |
+| Checkpoint | Git Ref | Benchmark | Subset | Correct | Incorrect | Errors | Accuracy | Avg Time |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| `checkpoint-1` | first tagged eval | GSM8K | 100 | 61 | 39 | 0 | 61.00% | n/a |
+| `checkpoint-2` | `68c4bb6` | GSM8K | 100 | 67 | 33 | 0 | 67.00% | 4.59s |
+| `checkpoint-3` | `ae25e49` | GSM8K | 100 | 71 | 29 | 0 | 71.00% | 6.83s |
 
-**Evaluation Details:**
-- Held-out problems: 50
-- Base model: `Qwen/Qwen2.5-7B-Instruct`
-- Fine-tuned model: GRPO with 3 epochs, lr=5e-5
-- Timestamp: 2026-01-10
+## Evaluation Health Rules
 
-### Training Configuration
+Benchmark JSON files are only safe to quote when they are fully valid.
 
-```yaml
-method: GRPO (Group Relative Policy Optimization)
-base_model: Qwen/Qwen2.5-7B-Instruct
-epochs: 3
-learning_rate: 5e-5
-lora_r: 8
-lora_alpha: 16
-kl_coef: 0.1
-clip_range: 0.2
-training_samples: 2000
-dpo_pairs: 3125
+- `valid_run: true` means the run completed with `errors == 0`
+- `status: partial` means some benchmark items failed, so the accuracy is incomplete
+- `status: failed` means every item errored, so the artifact is not a real score
+
+In other words, this is valid:
+
+```json
+{
+  "correct": 71,
+  "incorrect": 29,
+  "errors": 0,
+  "accuracy": 0.71,
+  "valid_run": true
+}
 ```
 
-### Key Insights
+And this is not a benchmark score:
 
-1. **GRPO Training**: Successfully trained without a reward model by using group-relative advantages
-2. **Loss Trajectory**: Loss decreased from -0.0017 → -0.0352 (more negative = better preference learning)
-3. **Test-Time Scaling**: Pass@k shows 0.0% improvement from k=1 to k=8
+```json
+{
+  "correct": 0,
+  "incorrect": 0,
+  "errors": 100,
+  "accuracy": 0.0,
+  "valid_run": false,
+  "status": "failed"
+}
+```
+
+## Reproducibility
+
+Every evaluation run should now emit:
+
+- benchmark results JSON
+- `run_manifest.json`
+
+The manifest captures the timestamp, model, benchmark, TTC settings, git
+commit, and git branch so a number can be traced back to the exact repo state
+that produced it.
+
+For strict automation, use:
+
+```bash
+python main.py evaluate --model ./outputs/grpo_model --benchmark gsm8k --fail-on-errors
+```
+
+That makes incomplete runs exit non-zero instead of quietly looking like usable
+results.

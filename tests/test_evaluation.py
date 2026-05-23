@@ -8,9 +8,61 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from evaluation.benchmarks import GSM8KEvaluator
+from evaluation.benchmarks import BenchmarkResult, GSM8KEvaluator
 from evaluation.test_time_compute import GeneratedPath, TestTimeCompute, TestTimeComputeConfig
+from scripts.evaluate import finalize_result
 from verifier import GSM8KVerifier
+
+
+def test_benchmark_result_marks_failed_runs_invalid(tmp_path):
+    result = BenchmarkResult(
+        benchmark_name="GSM8K",
+        total_problems=100,
+        correct=0,
+        incorrect=0,
+        errors=100,
+        accuracy=0.0,
+        avg_time_per_problem=0.0,
+        metadata={"model": "dummy"},
+    )
+
+    exit_code = finalize_result(
+        result,
+        str(tmp_path / "gsm8k_results.json"),
+        str(tmp_path),
+        fail_on_errors=False,
+    )
+
+    assert exit_code == 2
+    assert result.status == "failed"
+    assert result.valid_run is False
+    saved = (tmp_path / "gsm8k_results.json").read_text()
+    assert '"status": "failed"' in saved
+    assert '"valid_run": false' in saved
+
+
+def test_benchmark_result_marks_partial_runs_when_requested(tmp_path):
+    result = BenchmarkResult(
+        benchmark_name="GSM8K",
+        total_problems=10,
+        correct=7,
+        incorrect=1,
+        errors=2,
+        accuracy=0.7,
+        avg_time_per_problem=1.0,
+        metadata={"model": "dummy"},
+    )
+
+    exit_code = finalize_result(
+        result,
+        str(tmp_path / "gsm8k_results.json"),
+        str(tmp_path),
+        fail_on_errors=True,
+    )
+
+    assert exit_code == 2
+    assert result.status == "partial"
+    assert result.valid_run is False
 
 
 def test_base_evaluator_setup_skips_standard_generator_in_ttc_mode(monkeypatch):

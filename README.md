@@ -436,6 +436,23 @@ answer. If you explicitly want oracle verifier reranking for analysis, pass
 `--ttc-oracle-verify` and treat that result as diagnostic rather than a
 benchmark number.
 
+Each evaluation run now writes:
+
+- a benchmark result JSON with `status`, `valid_run`, and `success_rate`
+- a `run_manifest.json` file with timestamp, git commit, branch, model, and CLI settings
+
+Interpretation rule:
+
+- `valid_run: true` means `errors == 0` and the score is safe to quote
+- `status: partial` means the run finished with some benchmark-item failures
+- `status: failed` means every item errored and the artifact is not a real score
+
+If you want CI or notebook automation to stop on incomplete runs, add:
+
+```bash
+python main.py evaluate --model ./grpo_output --benchmark gsm8k --fail-on-errors
+```
+
 ### Run the full pipeline
 
 ```bash

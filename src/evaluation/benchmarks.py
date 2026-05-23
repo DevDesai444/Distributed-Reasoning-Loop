@@ -10,6 +10,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 from tqdm import tqdm
 import time
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -25,25 +26,58 @@ class BenchmarkResult:
     accuracy: float
     avg_time_per_problem: float
     details: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def completed(self) -> int:
+        return max(0, self.total_problems - self.errors)
+
+    @property
+    def success_rate(self) -> float:
+        if self.total_problems == 0:
+            return 0.0
+        return self.completed / self.total_problems
+
+    @property
+    def status(self) -> str:
+        if self.total_problems == 0:
+            return "empty"
+        if self.errors == 0:
+            return "success"
+        if self.errors == self.total_problems:
+            return "failed"
+        return "partial"
+
+    @property
+    def valid_run(self) -> bool:
+        return self.status == "success"
     
     def to_dict(self) -> Dict[str, Any]:
         return {
             "benchmark": self.benchmark_name,
             "total": self.total_problems,
+            "completed": self.completed,
             "correct": self.correct,
             "incorrect": self.incorrect,
             "errors": self.errors,
             "accuracy": self.accuracy,
             "avg_time": self.avg_time_per_problem,
+            "success_rate": self.success_rate,
+            "status": self.status,
+            "valid_run": self.valid_run,
         }
     
     def save(self, path: str):
         """Save results to file."""
+        payload = {
+            "summary": self.to_dict(),
+            "details": self.details,
+        }
+        if self.metadata:
+            payload["metadata"] = self.metadata
+
         with open(path, "w") as f:
-            json.dump({
-                "summary": self.to_dict(),
-                "details": self.details,
-            }, f, indent=2)
+            json.dump(payload, f, indent=2)
 
 
 class BaseEvaluator:
@@ -66,6 +100,7 @@ class BaseEvaluator:
         self.generator = None
         self.ttc = None
         self.verifier = None
+        self.run_metadata: Dict[str, Any] = {}
     
     def setup(self):
         """Initialize components."""
@@ -211,6 +246,11 @@ class GSM8KEvaluator(BaseEvaluator):
             accuracy=correct / num_problems if num_problems > 0 else 0,
             avg_time_per_problem=total_time / num_problems if num_problems > 0 else 0,
             details=results,
+            metadata={
+                **self.run_metadata,
+                "benchmark": self.BENCHMARK_NAME,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            },
         )
 
 
@@ -323,6 +363,11 @@ class HumanEvalEvaluator(BaseEvaluator):
             accuracy=correct / num_problems if num_problems > 0 else 0,
             avg_time_per_problem=total_time / num_problems if num_problems > 0 else 0,
             details=results,
+            metadata={
+                **self.run_metadata,
+                "benchmark": self.BENCHMARK_NAME,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            },
         )
 
 
@@ -449,6 +494,11 @@ class MATHEvaluator(BaseEvaluator):
             accuracy=correct / num_problems if num_problems > 0 else 0,
             avg_time_per_problem=total_time / num_problems if num_problems > 0 else 0,
             details=results,
+            metadata={
+                **self.run_metadata,
+                "benchmark": self.BENCHMARK_NAME,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            },
         )
 
 
@@ -460,6 +510,7 @@ def run_all_benchmarks(
     humaneval_subset_size: Optional[int] = None,
     ttc_samples: int = 16,
     ttc_oracle_verify: bool = False,
+    run_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, BenchmarkResult]:
     """
     Run all benchmarks and save results.
@@ -485,6 +536,7 @@ def run_all_benchmarks(
         ttc_samples=ttc_samples,
         ttc_oracle_verify=ttc_oracle_verify,
     )
+    gsm8k.run_metadata = run_metadata or {}
     gsm8k_result = gsm8k.evaluate(subset_size=gsm8k_subset_size)
     gsm8k_result.save(f"{output_dir}/gsm8k_results.json")
     results["gsm8k"] = gsm8k_result
@@ -492,6 +544,7 @@ def run_all_benchmarks(
     # HumanEval
     logger.info("Running HumanEval evaluation...")
     humaneval = HumanEvalEvaluator(model_name)
+    humaneval.run_metadata = run_metadata or {}
     humaneval_result = humaneval.evaluate(subset_size=humaneval_subset_size)
     humaneval_result.save(f"{output_dir}/humaneval_results.json")
     results["humaneval"] = humaneval_result
