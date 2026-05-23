@@ -57,6 +57,11 @@ def main():
         help="Number of samples for test-time compute",
     )
     parser.add_argument(
+        "--ttc-oracle-verify",
+        action="store_true",
+        help="Use ground-truth verifier reranking during TTC (analysis only, not a valid benchmark setting)",
+    )
+    parser.add_argument(
         "--split",
         type=str,
         default="test",
@@ -87,6 +92,7 @@ def main():
             gsm8k_subset_size=args.subset_size,
             humaneval_subset_size=args.subset_size,
             ttc_samples=args.ttc_samples,
+            ttc_oracle_verify=args.ttc_oracle_verify,
         )
         
         for name, result in results.items():
@@ -97,6 +103,7 @@ def main():
             model_name=args.model,
             use_test_time_compute=args.use_ttc,
             ttc_samples=args.ttc_samples,
+            ttc_oracle_verify=args.ttc_oracle_verify,
         )
         result = evaluator.evaluate(
             split=args.split,
@@ -125,6 +132,7 @@ def main():
             model_name=args.model,
             use_test_time_compute=args.use_ttc,
             ttc_samples=args.ttc_samples,
+            ttc_oracle_verify=args.ttc_oracle_verify,
         )
         result = evaluator.evaluate(
             split=args.split,
