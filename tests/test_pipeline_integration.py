@@ -321,6 +321,7 @@ def test_pipeline_generate_train_eval_end_to_end(monkeypatch, tmp_path):
     latest_run = json.loads((tmp_path / "outputs" / "latest_run.json").read_text())
     run_dir = Path(latest_run["run_dir"])
 
+    assert (run_dir / "synthetic_data" / "stage_manifest.json").exists()
     assert (run_dir / "dpo_model" / "fake_dpo_done.txt").exists()
     assert (run_dir / "sft_model" / "stage_manifest.json").exists()
     assert (run_dir / "dpo_model" / "stage_manifest.json").exists()

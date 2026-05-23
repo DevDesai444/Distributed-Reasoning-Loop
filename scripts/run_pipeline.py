@@ -606,6 +606,17 @@ def main():
         samples, pairs = run_data_generation(config, args)
         data_path = f"{config.general.output_dir}/synthetic_data/dpo_pairs.jsonl"
         correct_data_path = f"{config.general.output_dir}/synthetic_data/correct_samples.jsonl"
+        write_stage_manifest(
+            f"{config.general.output_dir}/synthetic_data",
+            {
+                "stage": "generation",
+                "dataset": args.dataset,
+                "sample_count": len(samples),
+                "pair_count": len(pairs),
+                "data_path": str(Path(data_path).resolve()),
+                "correct_data_path": str(Path(correct_data_path).resolve()),
+            },
+        )
         run_artifacts.record_artifact(
             stage="generation",
             name="synthetic_data_dir",
