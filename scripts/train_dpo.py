@@ -120,6 +120,13 @@ def main():
         action="store_true",
         help="Use rejection sampling DPO",
     )
+    parser.add_argument(
+        "--problem-type",
+        type=str,
+        default=None,
+        choices=["math", "code"],
+        help="Prompt template family to use for DPO formatting",
+    )
     
     args = parser.parse_args()
 
@@ -145,6 +152,7 @@ def main():
         num_epochs=args.num_epochs,
         output_dir=args.output_dir,
         use_lora=args.use_lora and not args.no_lora,
+        problem_type=args.problem_type or config.get("training", {}).get("problem_type", "math"),
     )
     
     logger.info(f"Training configuration:")
