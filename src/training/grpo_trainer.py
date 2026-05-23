@@ -251,8 +251,13 @@ class GRPOConfig:
     eval_interval_steps: int = 50
     heldout_eval_size: int = 20
     heldout_split: str = "test"
+    heldout_dataset: str = "gsm8k"
     eval_max_new_tokens: int = 256
     output_dir: str = "./grpo_output"
+    save_best_checkpoint: bool = True
+    best_checkpoint_metric: str = "pass_at_1"
+    min_eval_improvement: float = 1e-4
+    early_stop_patience: int = 0
 
     bf16: bool = True
     gradient_checkpointing: bool = True
@@ -281,6 +286,12 @@ class GRPOConfig:
 
     wandb_project: str = "distributed-reasoning-loop"
     wandb_mode: str = "offline"
+
+
+SUPPORTED_CHECKPOINT_METRICS = {
+    "pass_at_1",
+    "mean_reward",
+}
 
 
 class GRPODataset(Dataset):
@@ -353,6 +364,12 @@ class ReasoningGRPOTrainer:
 
     def __init__(self, config: GRPOConfig):
         self.config = config
+        if self.config.best_checkpoint_metric not in SUPPORTED_CHECKPOINT_METRICS:
+            raise ValueError(
+                "Unsupported best_checkpoint_metric="
+                f"{self.config.best_checkpoint_metric!r}. "
+                f"Expected one of {sorted(SUPPORTED_CHECKPOINT_METRICS)}."
+            )
         self.model = None
         self.ref_model = None
         self.tokenizer = None
@@ -367,6 +384,9 @@ class ReasoningGRPOTrainer:
         self.local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
         self.distributed = self.world_size > 1
+        self.best_eval_score: Optional[float] = None
+        self.best_eval_step: Optional[int] = None
+        self.no_improvement_evals: int = 0
 
     def _is_main_process(self) -> bool:
         return self.rank == 0
@@ -796,9 +816,10 @@ class ReasoningGRPOTrainer:
             return self._heldout_problems
 
         try:
-            from data_generator.dataset_loader import GSM8KLoader
+            from data_generator.dataset_loader import get_loader
 
-            loader = GSM8KLoader(
+            loader = get_loader(
+                self.config.heldout_dataset,
                 split=self.config.heldout_split,
                 subset_size=self.config.heldout_eval_size,
             )
@@ -808,7 +829,11 @@ class ReasoningGRPOTrainer:
                 for problem in problems
             ]
         except Exception as exc:
-            logger.warning("Unable to load held-out GSM8K problems: %s", exc)
+            logger.warning(
+                "Unable to load held-out %s problems: %s",
+                self.config.heldout_dataset,
+                exc,
+            )
             self._heldout_problems = []
 
         return self._heldout_problems
@@ -841,7 +866,7 @@ class ReasoningGRPOTrainer:
         prompt_len = inputs["input_ids"].shape[1]
         return self.tokenizer.decode(outputs[0, prompt_len:], skip_special_tokens=True)
 
-    def evaluate_checkpoint(self, step: int) -> Optional[float]:
+    def evaluate_checkpoint(self, step: int) -> Optional[Dict[str, float]]:
         """
         Evaluate pass@1 on held-out GSM8K problems every fixed number of optimizer steps.
         """
@@ -869,15 +894,101 @@ class ReasoningGRPOTrainer:
                 correct += 1
 
         pass_at_1 = correct / len(problems)
+        metrics = {
+            "step": step,
+            "dataset": self.config.heldout_dataset,
+            "split": self.config.heldout_split,
+            "pass_at_1": pass_at_1,
+            "mean_reward": sum(rewards) / len(rewards) if rewards else 0.0,
+            "num_problems": len(problems),
+            "num_correct": correct,
+        }
         log_to_wandb(
             {
                 f"eval/pass_at_1_step_{step}": pass_at_1,
-                "eval/mean_reward": sum(rewards) / len(rewards) if rewards else 0.0,
+                "eval/mean_reward": metrics["mean_reward"],
             },
             step=step,
         )
+        eval_dir = Path(self.config.output_dir) / "eval"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        with open(eval_dir / "heldout_eval_history.jsonl", "a") as handle:
+            handle.write(json.dumps(metrics) + "\n")
         self.model.train()
-        return pass_at_1
+        return metrics
+
+    def _selection_metric_value(self, metrics: Dict[str, float]) -> Optional[float]:
+        value = metrics.get(self.config.best_checkpoint_metric)
+        if value is None:
+            logger.warning(
+                "Held-out metrics are missing %s; skipping best-checkpoint update.",
+                self.config.best_checkpoint_metric,
+            )
+            return None
+        return float(value)
+
+    def _write_selection_state(self) -> None:
+        if not self._is_main_process():
+            return
+        selection_state = {
+            "best_eval_score": self.best_eval_score,
+            "best_eval_step": self.best_eval_step,
+            "no_improvement_evals": self.no_improvement_evals,
+            "heldout_dataset": self.config.heldout_dataset,
+            "heldout_split": self.config.heldout_split,
+            "best_checkpoint_metric": self.config.best_checkpoint_metric,
+        }
+        selection_dir = Path(self.config.output_dir)
+        selection_dir.mkdir(parents=True, exist_ok=True)
+        with open(selection_dir / "checkpoint_selection.json", "w") as handle:
+            json.dump(selection_state, handle, indent=2)
+
+    def _maybe_update_best_checkpoint(
+        self,
+        step: int,
+        metrics: Optional[Dict[str, float]],
+    ) -> bool:
+        if metrics is None or not self._is_main_process():
+            return False
+
+        score = self._selection_metric_value(metrics)
+        if score is None:
+            return False
+
+        is_improved = (
+            self.best_eval_score is None
+            or score > self.best_eval_score + self.config.min_eval_improvement
+        )
+        if is_improved:
+            self.best_eval_score = score
+            self.best_eval_step = step
+            self.no_improvement_evals = 0
+            if self.config.save_best_checkpoint:
+                best_dir = Path(self.config.output_dir) / "best_checkpoint"
+                self.save(best_dir, merge_lora=False)
+            self._write_selection_state()
+            logger.info(
+                "New best GRPO checkpoint at step %s with held-out %s %.4f",
+                step,
+                self.config.best_checkpoint_metric,
+                score,
+            )
+            return False
+
+        self.no_improvement_evals += 1
+        self._write_selection_state()
+        logger.info(
+            "Held-out %s %.4f did not improve best %.4f (patience %s/%s)",
+            self.config.best_checkpoint_metric,
+            score,
+            self.best_eval_score,
+            self.no_improvement_evals,
+            self.config.early_stop_patience,
+        )
+        return (
+            self.config.early_stop_patience > 0
+            and self.no_improvement_evals >= self.config.early_stop_patience
+        )
 
     def train(self, data: List[Dict[str, Any]]):
         """Train the policy with custom GRPO updates."""
@@ -946,6 +1057,7 @@ class ReasoningGRPOTrainer:
             if self._is_main_process():
                 logger.info("GRPO epoch %s/%s", epoch + 1, self.config.num_epochs)
             epoch_loss = 0.0
+            should_stop = False
             progress = tqdm(
                 local_batch_starts,
                 desc=f"Epoch {epoch + 1}",
@@ -1165,9 +1277,31 @@ class ReasoningGRPOTrainer:
                     and self.config.eval_interval_steps > 0
                     and global_step % self.config.eval_interval_steps == 0
                 ):
-                    self.evaluate_checkpoint(global_step)
+                    should_stop = self._maybe_update_best_checkpoint(
+                        global_step,
+                        self.evaluate_checkpoint(global_step),
+                    )
+                else:
+                    should_stop = False
+
+                if self.distributed:
+                    stop_tensor = torch.tensor(
+                        [1 if should_stop else 0],
+                        device=next(self.model.parameters()).device,
+                        dtype=torch.int32,
+                    )
+                    dist.broadcast(stop_tensor, src=0)
+                    should_stop = bool(stop_tensor.item())
+
+                if should_stop:
+                    if self._is_main_process():
+                        logger.info("Early stopping GRPO after step %s", global_step)
+                    break
 
                 total_loss += accumulated_loss
+
+            if should_stop:
+                break
 
             if self._is_main_process():
                 logger.info(
@@ -1178,18 +1312,19 @@ class ReasoningGRPOTrainer:
 
         if self._is_main_process():
             self.save()
+            self._write_selection_state()
             avg_loss = total_loss / max(len(local_batch_starts), 1)
             logger.info("GRPO training complete. Average loss: %.4f", avg_loss)
 
         if self.distributed and dist.is_initialized():
             dist.barrier()
 
-    def save(self, path: Optional[str] = None):
+    def save(self, path: Optional[str] = None, merge_lora: bool = True):
         save_path = Path(path or self.config.output_dir)
         save_path.mkdir(parents=True, exist_ok=True)
         model_to_save = self._unwrap_model()
 
-        if self.config.use_lora and hasattr(model_to_save, "merge_and_unload"):
+        if self.config.use_lora and merge_lora and hasattr(model_to_save, "merge_and_unload"):
             logger.info("Merging LoRA adapters before save")
             merged_model = model_to_save.merge_and_unload()
             merged_model.save_pretrained(save_path)
@@ -1214,6 +1349,13 @@ def train_grpo_from_synthetic_data(
     enable_ray_verification: bool = True,
     ray_verifier_workers: int = 4,
     verifier_type: str = "math",
+    heldout_dataset: str = "gsm8k",
+    heldout_split: str = "test",
+    heldout_eval_size: int = 20,
+    save_best_checkpoint: bool = True,
+    best_checkpoint_metric: str = "pass_at_1",
+    min_eval_improvement: float = 1e-4,
+    early_stop_patience: int = 0,
     distributed_timeout_minutes: int = 0,
 ):
     """Convenience entry point for GRPO training from a JSONL file."""
@@ -1235,6 +1377,13 @@ def train_grpo_from_synthetic_data(
         enable_ray_verification=enable_ray_verification,
         ray_verifier_workers=ray_verifier_workers,
         verifier_type=verifier_type,
+        heldout_dataset=heldout_dataset,
+        heldout_split=heldout_split,
+        heldout_eval_size=heldout_eval_size,
+        save_best_checkpoint=save_best_checkpoint,
+        best_checkpoint_metric=best_checkpoint_metric,
+        min_eval_improvement=min_eval_improvement,
+        early_stop_patience=early_stop_patience,
         distributed_timeout_minutes=distributed_timeout_minutes,
     )
 
@@ -1273,6 +1422,14 @@ if __name__ == "__main__":
     parser.add_argument("--disable-ray-verification", action="store_true")
     parser.add_argument("--ray-verifier-workers", type=int, default=4)
     parser.add_argument("--verifier-type", type=str, default="math", choices=["math", "code"])
+    parser.add_argument("--heldout-dataset", type=str, default="gsm8k")
+    parser.add_argument("--heldout-split", type=str, default="test")
+    parser.add_argument("--heldout-eval-size", type=int, default=20)
+    parser.add_argument("--save-best-checkpoint", action="store_true")
+    parser.add_argument("--disable-save-best-checkpoint", action="store_true")
+    parser.add_argument("--best-checkpoint-metric", type=str, default="pass_at_1")
+    parser.add_argument("--min-eval-improvement", type=float, default=1e-4)
+    parser.add_argument("--early-stop-patience", type=int, default=0)
     parser.add_argument(
         "--distributed-timeout-minutes",
         type=int,
@@ -1323,5 +1480,12 @@ if __name__ == "__main__":
         enable_ray_verification=(False if args.disable_ray_verification else True if args.enable_ray_verification else True),
         ray_verifier_workers=args.ray_verifier_workers,
         verifier_type=args.verifier_type,
+        heldout_dataset=args.heldout_dataset,
+        heldout_split=args.heldout_split,
+        heldout_eval_size=args.heldout_eval_size,
+        save_best_checkpoint=(False if args.disable_save_best_checkpoint else True if args.save_best_checkpoint else True),
+        best_checkpoint_metric=args.best_checkpoint_metric,
+        min_eval_improvement=args.min_eval_improvement,
+        early_stop_patience=args.early_stop_patience,
         distributed_timeout_minutes=args.distributed_timeout_minutes,
     )

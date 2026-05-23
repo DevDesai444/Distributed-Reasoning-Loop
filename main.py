@@ -64,12 +64,22 @@ def cmd_train_grpo(args):
             "--online-top-p", str(parsed_args.online_top_p),
             "--online-resample-attempts", str(parsed_args.online_resample_attempts),
             "--ray-verifier-workers", str(parsed_args.ray_verifier_workers),
+            "--heldout-dataset", parsed_args.heldout_dataset,
+            "--heldout-split", parsed_args.heldout_split,
+            "--heldout-eval-size", str(parsed_args.heldout_eval_size),
+            "--best-checkpoint-metric", parsed_args.best_checkpoint_metric,
+            "--min-eval-improvement", str(parsed_args.min_eval_improvement),
+            "--early-stop-patience", str(parsed_args.early_stop_patience),
             "--num-gpus", str(parsed_args.num_gpus),
         ]
         if parsed_args.enable_ray_verification and not parsed_args.disable_ray_verification:
             forwarded.append("--enable-ray-verification")
         if parsed_args.disable_ray_verification:
             forwarded.append("--disable-ray-verification")
+        if parsed_args.save_best_checkpoint and not parsed_args.disable_save_best_checkpoint:
+            forwarded.append("--save-best-checkpoint")
+        if parsed_args.disable_save_best_checkpoint:
+            forwarded.append("--disable-save-best-checkpoint")
         return forwarded
     
     parser = argparse.ArgumentParser()
@@ -86,6 +96,14 @@ def cmd_train_grpo(args):
     parser.add_argument('--enable-ray-verification', action='store_true')
     parser.add_argument('--disable-ray-verification', action='store_true')
     parser.add_argument('--ray-verifier-workers', type=int, default=4)
+    parser.add_argument('--heldout-dataset', type=str, default='gsm8k')
+    parser.add_argument('--heldout-split', type=str, default='test')
+    parser.add_argument('--heldout-eval-size', type=int, default=20)
+    parser.add_argument('--save-best-checkpoint', action='store_true')
+    parser.add_argument('--disable-save-best-checkpoint', action='store_true')
+    parser.add_argument('--best-checkpoint-metric', type=str, default='pass_at_1')
+    parser.add_argument('--min-eval-improvement', type=float, default=1e-4)
+    parser.add_argument('--early-stop-patience', type=int, default=0)
     parser.add_argument('--num-gpus', type=str, default='auto')
     
     grpo_args = parser.parse_args(args.remaining)
@@ -112,6 +130,17 @@ def cmd_train_grpo(args):
             else True
         ),
         ray_verifier_workers=grpo_args.ray_verifier_workers,
+        heldout_dataset=grpo_args.heldout_dataset,
+        heldout_split=grpo_args.heldout_split,
+        heldout_eval_size=grpo_args.heldout_eval_size,
+        save_best_checkpoint=(
+            False
+            if grpo_args.disable_save_best_checkpoint
+            else True
+        ),
+        best_checkpoint_metric=grpo_args.best_checkpoint_metric,
+        min_eval_improvement=grpo_args.min_eval_improvement,
+        early_stop_patience=grpo_args.early_stop_patience,
     )
 
 
