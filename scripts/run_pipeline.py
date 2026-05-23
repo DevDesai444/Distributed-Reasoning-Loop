@@ -691,6 +691,12 @@ def main():
             path=selection_metadata["selected_model_path"],
             metadata=selection_metadata,
         )
+        run_artifacts.record_artifact(
+            stage="evaluation",
+            name="evaluation_selection",
+            path=Path(config.general.output_dir) / "evaluation_selection.json",
+            metadata=selection_metadata,
+        )
     
     elapsed = time.time() - start_time
     summary = {
