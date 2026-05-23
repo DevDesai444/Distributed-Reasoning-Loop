@@ -26,6 +26,7 @@ def load_gsm8k_problems(num_problems: int):
 
 def evaluate_mode(model_name: str, problems, reranker_type: str, reward_model_path: str | None, process_reward_model_path: str | None, num_samples: int) -> float:
     from evaluation.test_time_compute import TestTimeCompute, TestTimeComputeConfig
+    from verifier import GSM8KVerifier
 
     config = TestTimeComputeConfig(
         num_samples=num_samples,
@@ -36,11 +37,14 @@ def evaluate_mode(model_name: str, problems, reranker_type: str, reward_model_pa
     )
     ttc = TestTimeCompute(model_name, config, verifier_type="math")
     ttc.setup()
+    verifier = GSM8KVerifier()
 
     solved = 0
     for problem in problems:
-        best, _ = ttc.solve(problem["prompt"], problem["answer"])
-        if best.is_correct:
+        best, _ = ttc.solve(problem["prompt"])
+        predicted = best.final_answer or ""
+        result = verifier.verify(predicted, problem["answer"])
+        if result.status.value == "correct":
             solved += 1
 
     return solved / len(problems) if problems else 0.0
