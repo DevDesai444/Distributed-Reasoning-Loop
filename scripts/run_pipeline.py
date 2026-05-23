@@ -5,6 +5,7 @@ Orchestrates data generation, training, and evaluation.
 """
 
 import argparse
+import inspect
 import logging
 import sys
 from pathlib import Path
@@ -82,6 +83,21 @@ def stream_pipeline_data_to_kafka(config, samples, pairs):
         logger.warning("Kafka publish failed mid-stream: %s", exc)
     finally:
         producer.close()
+
+
+def _dataset_problem_type(dataset_name: str) -> str:
+    return "code" if dataset_name in {"humaneval", "mbpp"} else "math"
+
+
+def _construct_with_supported_kwargs(factory, **kwargs):
+    """Instantiate an object while tolerating older/fake constructors in tests."""
+    signature = inspect.signature(factory)
+    supported = {
+        key: value
+        for key, value in kwargs.items()
+        if key in signature.parameters
+    }
+    return factory(**supported)
 
 
 def run_data_generation(config, args):
@@ -162,7 +178,7 @@ def run_data_generation(config, args):
     return samples, pairs
 
 
-def run_sft_training(config, data_path):
+def run_sft_training(config, data_path, dataset_name):
     """Run supervised fine-tuning phase."""
     from training import SFTTrainerConfig, SFTFromSyntheticData
     
@@ -170,11 +186,13 @@ def run_sft_training(config, data_path):
     logger.info("Phase 2a: Supervised Fine-Tuning")
     logger.info("=" * 50)
     
-    sft_config = SFTTrainerConfig(
+    sft_config = _construct_with_supported_kwargs(
+        SFTTrainerConfig,
         model_name=config.data_generator.student_model,
         learning_rate=config.training.learning_rate * 2,  # Higher LR for SFT
         batch_size=config.training.batch_size,
         num_epochs=1,  # Quick SFT pass
+        problem_type=_dataset_problem_type(dataset_name),
         output_dir=f"{config.general.output_dir}/sft_model",
     )
     
@@ -184,7 +202,7 @@ def run_sft_training(config, data_path):
     return sft_config.output_dir
 
 
-def run_dpo_training(config, data_path, base_model=None):
+def run_dpo_training(config, data_path, dataset_name, base_model=None):
     """Run DPO training phase."""
     from training import DPOTrainerConfig, ReasoningDPOTrainer
     import json
@@ -201,13 +219,15 @@ def run_dpo_training(config, data_path, base_model=None):
     
     model_name = base_model or config.data_generator.student_model
     
-    dpo_config = DPOTrainerConfig(
+    dpo_config = _construct_with_supported_kwargs(
+        DPOTrainerConfig,
         model_name=model_name,
         beta=config.training.dpo.beta,
         learning_rate=config.training.learning_rate,
         batch_size=config.training.batch_size,
         num_epochs=config.training.num_epochs,
         max_length=config.training.dpo.max_length,
+        problem_type=_dataset_problem_type(dataset_name),
         output_dir=f"{config.general.output_dir}/dpo_model",
     )
     
@@ -217,7 +237,7 @@ def run_dpo_training(config, data_path, base_model=None):
     return dpo_config.output_dir
 
 
-def run_grpo_training(config, data_path, base_model=None):
+def run_grpo_training(config, data_path, dataset_name, base_model=None):
     """Run GRPO training phase."""
     from training.grpo_trainer import GRPOConfig, ReasoningGRPOTrainer
     import json
@@ -234,7 +254,8 @@ def run_grpo_training(config, data_path, base_model=None):
     
     model_name = base_model or config.data_generator.student_model
     
-    grpo_config = GRPOConfig(
+    grpo_config = _construct_with_supported_kwargs(
+        GRPOConfig,
         model_name=model_name,
         learning_rate=config.training.learning_rate,
         batch_size=config.training.batch_size,
@@ -256,6 +277,7 @@ def run_grpo_training(config, data_path, base_model=None):
         online_min_reward_std=config.training.grpo.online_min_reward_std,
         enable_ray_verification=config.training.grpo.enable_ray_verification,
         ray_verifier_workers=config.training.grpo.ray_verifier_workers,
+        prompt_problem_type=_dataset_problem_type(dataset_name),
         wandb_project=config.training.wandb.project,
         wandb_mode=config.training.wandb.mode,
         output_dir=f"{config.general.output_dir}/grpo_model",
@@ -276,22 +298,27 @@ def run_evaluation(config, model_path, args):
     logger.info("=" * 50)
     
     results = {}
+    ttc_oracle_verify = bool(args.ttc_oracle_verify or config.training.evaluation.get("oracle_verify", False))
     
     if args.dataset == "gsm8k":
-        evaluator = GSM8KEvaluator(
+        evaluator = _construct_with_supported_kwargs(
+            GSM8KEvaluator,
             model_name=model_path,
             use_test_time_compute=args.use_ttc,
             ttc_samples=config.training.evaluation.num_paths,
+            ttc_oracle_verify=ttc_oracle_verify,
         )
         result = evaluator.evaluate(subset_size=args.eval_subset_size)
         results["gsm8k"] = result
         logger.info(f"GSM8K Accuracy: {result.accuracy:.2%}")
 
     if args.dataset == "math":
-        evaluator = MATHEvaluator(
+        evaluator = _construct_with_supported_kwargs(
+            MATHEvaluator,
             model_name=model_path,
             use_test_time_compute=args.use_ttc,
             ttc_samples=config.training.evaluation.num_paths,
+            ttc_oracle_verify=ttc_oracle_verify,
         )
         result = evaluator.evaluate(subset_size=args.eval_subset_size)
         results["math"] = result
@@ -345,8 +372,7 @@ def main():
     parser.add_argument(
         "--skip-sft",
         action="store_true",
-        default=True,
-        help="Skip SFT phase (default: True)",
+        help="Skip SFT phase",
     )
     parser.add_argument(
         "--run-sft",
@@ -369,6 +395,11 @@ def main():
         help="Use test-time compute for evaluation",
     )
     parser.add_argument(
+        "--ttc-oracle-verify",
+        action="store_true",
+        help="Allow ground-truth verifier reranking during TTC evaluation (analysis only, not a valid benchmark setting)",
+    )
+    parser.add_argument(
         "--eval-subset-size",
         type=int,
         default=None,
@@ -389,15 +420,16 @@ def main():
     parser.add_argument(
         "--training-method",
         type=str,
-        default="dpo",
-        choices=["dpo", "grpo"],
-        help="Training method: dpo or grpo",
+        default=None,
+        choices=["dpo", "grpo", "best"],
+        help="Training method: dpo, grpo, or best (SFT -> DPO -> GRPO)",
     )
     
     args = parser.parse_args()
     
     # Load config
     config = OmegaConf.load(args.config)
+    training_method = args.training_method or str(config.training.get("method", "best"))
 
     if config.training.wandb.enabled:
         config_payload = OmegaConf.to_container(config, resolve=True)
@@ -432,15 +464,20 @@ def main():
     
     # Phase 2a: SFT (optional, disabled by default)
     sft_model = None
-    if args.run_sft and correct_data_path and Path(correct_data_path).exists():
-        sft_model = run_sft_training(config, correct_data_path)
+    run_sft = (args.run_sft or training_method == "best") and not args.skip_sft
+    if run_sft and correct_data_path and Path(correct_data_path).exists():
+        sft_model = run_sft_training(config, correct_data_path, args.dataset)
     
     # Phase 2b: DPO/GRPO Training
     if not args.skip_dpo and not args.model_path:
-        if args.training_method == "grpo":
-            model_path = run_grpo_training(config, data_path, sft_model)
+        if training_method == "grpo":
+            model_path = run_grpo_training(config, data_path, args.dataset, sft_model)
+        elif training_method == "best":
+            dpo_base_model = sft_model or config.data_generator.student_model
+            dpo_model = run_dpo_training(config, data_path, args.dataset, dpo_base_model)
+            model_path = run_grpo_training(config, data_path, args.dataset, dpo_model)
         else:
-            model_path = run_dpo_training(config, data_path, sft_model)
+            model_path = run_dpo_training(config, data_path, args.dataset, sft_model)
     else:
         model_path = args.model_path or config.data_generator.student_model
     
