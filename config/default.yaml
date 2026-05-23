@@ -110,6 +110,7 @@ training:
   evaluation:
     num_paths: 16
     oracle_verify: false
+    require_valid_run: true
     reward_model: "./outputs/reward_model"
     process_reward_model: "./outputs/process_reward_model"
 

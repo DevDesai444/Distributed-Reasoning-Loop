@@ -12,6 +12,7 @@ import types
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
 from omegaconf import OmegaConf
 
 
@@ -660,3 +661,68 @@ def test_resolve_evaluation_model_path_carries_checkpoint_selection_metadata(tmp
     assert metadata["selection_metric"] == "pass_at_1"
     assert metadata["selection_score"] == 0.74
     assert metadata["selection_step"] == 120
+
+
+def test_run_evaluation_rejects_invalid_benchmark_runs(monkeypatch, tmp_path):
+    pipeline_module = _load_run_pipeline_module()
+
+    class FakeEvalResult:
+        accuracy = 0.0
+        errors = 4
+        valid_run = False
+        status = "failed"
+
+        def save(self, path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text("{}")
+
+        def to_dict(self):
+            return {
+                "benchmark": "GSM8K",
+                "total": 4,
+                "completed": 0,
+                "correct": 0,
+                "incorrect": 0,
+                "errors": 4,
+                "accuracy": 0.0,
+                "avg_time": 0.0,
+                "success_rate": 0.0,
+                "status": "failed",
+                "valid_run": False,
+            }
+
+    class FakeGSM8KEvaluator:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def evaluate(self, subset_size):
+            return FakeEvalResult()
+
+    fake_evaluation = types.ModuleType("evaluation")
+    fake_evaluation.GSM8KEvaluator = FakeGSM8KEvaluator
+    fake_evaluation.HumanEvalEvaluator = object
+    fake_evaluation.MATHEvaluator = object
+    monkeypatch.setitem(sys.modules, "evaluation", fake_evaluation)
+
+    config = OmegaConf.create(
+        {
+            "training": {
+                "grpo": {"save_best_checkpoint": False},
+                "evaluation": {
+                    "num_paths": 2,
+                    "oracle_verify": False,
+                    "require_valid_run": True,
+                },
+            },
+            "general": {"output_dir": str(tmp_path / "outputs")},
+        }
+    )
+
+    class Args:
+        dataset = "gsm8k"
+        use_ttc = False
+        ttc_oracle_verify = False
+        eval_subset_size = 4
+
+    with pytest.raises(RuntimeError, match="invalid benchmark runs"):
+        pipeline_module.run_evaluation(config, "dummy-model", Args())

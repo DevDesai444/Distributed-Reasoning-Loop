@@ -394,6 +394,19 @@ def run_evaluation(config, model_path, args):
         result.save(f"{config.general.output_dir}/{name}_results.json")
     with open(f"{config.general.output_dir}/evaluation_selection.json", "w") as handle:
         json.dump(selection_metadata, handle, indent=2)
+
+    require_valid_run = bool(config.training.evaluation.get("require_valid_run", False))
+    if require_valid_run:
+        invalid = {
+            name: result.status
+            for name, result in results.items()
+            if not result.valid_run
+        }
+        if invalid:
+            raise RuntimeError(
+                "Evaluation produced invalid benchmark runs: "
+                + ", ".join(f"{name}={status}" for name, status in invalid.items())
+            )
     
     return results, selection_metadata
 
