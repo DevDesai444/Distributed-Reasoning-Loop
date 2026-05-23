@@ -30,6 +30,7 @@ if str(_SRC_ROOT) not in sys.path:
 
 from verifier import create_verifier, get_default_sandbox_image
 from wandb_utils import ensure_wandb_run, log_to_wandb
+from prompting import format_conversation, format_prompt
 
 try:
     from .runtime_utils import build_causal_lm_load_kwargs, get_runtime_device
@@ -238,6 +239,7 @@ class GRPOConfig:
 
     max_length: int = 1024
     max_prompt_length: int = 256
+    prompt_problem_type: str = "math"
 
     use_lora: bool = True
     lora_r: int = 8
@@ -417,13 +419,11 @@ class ReasoningGRPOTrainer:
 
     def _build_sequence_encodings(self, prompt: str, responses: List[str], device: torch.device):
         sequences = [
-            self.tokenizer.apply_chat_template(
-                [
-                    {"role": "user", "content": prompt},
-                    {"role": "assistant", "content": response},
-                ],
-                tokenize=False,
-                add_generation_prompt=False,
+            format_conversation(
+                self.tokenizer,
+                prompt,
+                response,
+                problem_type=self.config.prompt_problem_type,
             )
             for response in responses
         ]
@@ -480,11 +480,10 @@ class ReasoningGRPOTrainer:
         return None
 
     def _sample_group_responses(self, prompt: str) -> List[str]:
-        messages = [{"role": "user", "content": prompt}]
-        prompt_text = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
+        prompt_text = format_prompt(
+            self.tokenizer,
+            prompt,
+            problem_type=self.config.prompt_problem_type,
         )
         inputs = self.tokenizer(
             prompt_text,
@@ -815,11 +814,10 @@ class ReasoningGRPOTrainer:
         return self._heldout_problems
 
     def _generate_greedy_response(self, prompt: str) -> str:
-        messages = [{"role": "user", "content": prompt}]
-        prompt_text = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
+        prompt_text = format_prompt(
+            self.tokenizer,
+            prompt,
+            problem_type=self.config.prompt_problem_type,
         )
         inputs = self.tokenizer(
             prompt_text,
