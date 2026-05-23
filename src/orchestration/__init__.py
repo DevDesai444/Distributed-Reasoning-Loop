@@ -3,6 +3,30 @@ Orchestration module for distributed data processing.
 Kafka for streaming, Ray for distributed compute.
 """
 
+CORE_COMPONENTS = [
+    "KVCacheManager",
+    "DistributedKVCache",
+    "CacheEntry",
+    "CacheStats",
+]
+
+OPTIONAL_COMPONENTS = {
+    "distributed_compute": [
+        "RayClusterManager",
+        "RayClusterConfig",
+        "DataProcessingWorker",
+        "TokenizationWorker",
+        "BatchPreparationWorker",
+    ],
+    "streaming": [
+        "KafkaProducer",
+        "KafkaConsumer",
+        "KafkaConfig",
+        "ReasoningDataProducer",
+        "ReasoningDataConsumer",
+    ],
+}
+
 # Kafka imports (optional)
 try:
     from .kafka_streaming import (
@@ -68,4 +92,6 @@ __all__ = [
     # Availability flags
     "_kafka_available",
     "_ray_available",
+    "CORE_COMPONENTS",
+    "OPTIONAL_COMPONENTS",
 ]

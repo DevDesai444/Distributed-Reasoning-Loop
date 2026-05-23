@@ -3,6 +3,30 @@ Training module for RL-based reasoning model training.
 Supports DPO, GRPO, Rejection Sampling, and standard SFT.
 """
 
+CORE_TRAINING_STACK = [
+    "SFTTrainerConfig",
+    "ReasoningSFTTrainer",
+    "SFTFromSyntheticData",
+    "DPOTrainerConfig",
+    "ReasoningDPOTrainer",
+    "GRPOConfig",
+    "ReasoningGRPOTrainer",
+]
+
+OPTIONAL_TRAINING_TRACKS = {
+    "reward_modeling": [
+        "RewardModel",
+        "RewardModelConfig",
+    ],
+    "process_reward_modeling": [
+        "ProcessRewardModel",
+        "ProcessRewardModelConfig",
+    ],
+    "experimental_baselines": [
+        "RejectionSamplingDPO",
+    ],
+}
+
 from .dpo_trainer import (
     DPOTrainerConfig,
     ReasoningDPOTrainer,
@@ -38,6 +62,8 @@ __all__ = [
     # GRPO
     "GRPOConfig",
     "ReasoningGRPOTrainer",
+    "CORE_TRAINING_STACK",
+    "OPTIONAL_TRAINING_TRACKS",
     # Reward Model
     "RewardModel",
     "RewardModelConfig",

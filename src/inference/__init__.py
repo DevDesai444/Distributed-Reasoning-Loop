@@ -3,6 +3,21 @@ Inference module with Speculative Decoding support.
 Optimizes inference throughput for reasoning models.
 """
 
+CORE_INFERENCE_COMPONENTS = [
+    "VLLMEngine",
+    "VLLMConfig",
+    "SGLangEngine",
+    "SGLangConfig",
+]
+
+OPTIONAL_EXPERIMENTAL_COMPONENTS = {
+    "throughput_experiments": [
+        "SpeculativeDecoder",
+        "SpeculativeConfig",
+        "DraftTargetPair",
+    ],
+}
+
 from .speculative_decoding import (
     SpeculativeDecoder,
     SpeculativeConfig,
@@ -27,4 +42,6 @@ __all__ = [
     "VLLMConfig",
     "SGLangEngine",
     "SGLangConfig",
+    "CORE_INFERENCE_COMPONENTS",
+    "OPTIONAL_EXPERIMENTAL_COMPONENTS",
 ]
