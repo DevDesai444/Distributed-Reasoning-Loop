@@ -47,7 +47,8 @@ orchestration:
     eviction_policy: "lru"
 
 training:
-  method: "dpo"
+  method: "best"
+  problem_type: "math"
   batch_size: 2
   learning_rate: 1e-6
   num_epochs: 1
@@ -82,6 +83,7 @@ training:
 
   evaluation:
     num_paths: 16
+    oracle_verify: false
     reward_model: "./outputs/reward_model"
     process_reward_model: "./outputs/process_reward_model"
 
