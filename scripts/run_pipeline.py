@@ -6,14 +6,17 @@ Orchestrates data generation, training, and evaluation.
 
 import argparse
 import inspect
+import json
 import logging
 import sys
 from pathlib import Path
 import time
+from typing import Any, Dict, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from omegaconf import OmegaConf
+from run_artifacts import RunArtifacts
 from wandb_utils import ensure_wandb_run, get_wandb
 
 logging.basicConfig(
@@ -100,9 +103,34 @@ def _construct_with_supported_kwargs(factory, **kwargs):
     return factory(**supported)
 
 
+def resolve_evaluation_model_path(config, model_path: str) -> tuple[str, Dict[str, Any]]:
+    """
+    Choose the most appropriate checkpoint for final evaluation.
+
+    If GRPO saved a dedicated best checkpoint, prefer that over the latest
+    training output so benchmark numbers reflect the strongest held-out model.
+    """
+    metadata = {
+        "selected_model_path": model_path,
+        "selection_reason": "final_model",
+    }
+    model_dir = Path(model_path)
+    best_checkpoint_dir = model_dir / "best_checkpoint"
+
+    if (
+        bool(config.training.grpo.get("save_best_checkpoint", False))
+        and best_checkpoint_dir.exists()
+    ):
+        metadata["selected_model_path"] = str(best_checkpoint_dir)
+        metadata["selection_reason"] = "best_checkpoint"
+        return str(best_checkpoint_dir), metadata
+
+    return model_path, metadata
+
+
 def run_data_generation(config, args):
     """Run synthetic data generation phase."""
-    from data_generator import SyntheticDataPipeline, GenerationConfig
+    from data_generator import SyntheticDataPipeline, GenerationConfig, PreprocessConfig
     from data_generator.cot_generator import InferenceBackend
 
     def resolve_tensor_parallel_size(requested, backend_name: str) -> int:
@@ -166,6 +194,12 @@ def run_data_generation(config, args):
         generator_config=gen_config,
         dataset_name=args.dataset,
         output_dir=f"{config.general.output_dir}/synthetic_data",
+        preprocess_config=PreprocessConfig(
+            **OmegaConf.to_container(
+                config.data_generator.get("preprocessing", {}),
+                resolve=True,
+            )
+        ) if config.data_generator.get("preprocessing") else None,
     )
     
     samples, pairs = pipeline.run(
@@ -269,7 +303,12 @@ def run_grpo_training(config, data_path, dataset_name, base_model=None):
         kl_threshold=config.training.grpo.kl_threshold,
         eval_interval_steps=config.training.grpo.eval_interval_steps,
         heldout_eval_size=config.training.grpo.heldout_eval_size,
+        heldout_dataset=config.training.grpo.heldout_dataset,
         eval_max_new_tokens=config.training.grpo.eval_max_new_tokens,
+        save_best_checkpoint=config.training.grpo.save_best_checkpoint,
+        best_checkpoint_metric=config.training.grpo.best_checkpoint_metric,
+        min_eval_improvement=config.training.grpo.min_eval_improvement,
+        early_stop_patience=config.training.grpo.early_stop_patience,
         online_max_new_tokens=config.training.grpo.online_max_new_tokens,
         online_temperature=config.training.grpo.online_temperature,
         online_top_p=config.training.grpo.online_top_p,
@@ -298,12 +337,13 @@ def run_evaluation(config, model_path, args):
     logger.info("=" * 50)
     
     results = {}
+    evaluation_model_path, selection_metadata = resolve_evaluation_model_path(config, model_path)
     ttc_oracle_verify = bool(args.ttc_oracle_verify or config.training.evaluation.get("oracle_verify", False))
     
     if args.dataset == "gsm8k":
         evaluator = _construct_with_supported_kwargs(
             GSM8KEvaluator,
-            model_name=model_path,
+            model_name=evaluation_model_path,
             use_test_time_compute=args.use_ttc,
             ttc_samples=config.training.evaluation.num_paths,
             ttc_oracle_verify=ttc_oracle_verify,
@@ -315,7 +355,7 @@ def run_evaluation(config, model_path, args):
     if args.dataset == "math":
         evaluator = _construct_with_supported_kwargs(
             MATHEvaluator,
-            model_name=model_path,
+            model_name=evaluation_model_path,
             use_test_time_compute=args.use_ttc,
             ttc_samples=config.training.evaluation.num_paths,
             ttc_oracle_verify=ttc_oracle_verify,
@@ -325,7 +365,7 @@ def run_evaluation(config, model_path, args):
         logger.info(f"MATH Accuracy: {result.accuracy:.2%}")
     
     if args.dataset in ["humaneval", "mbpp"]:
-        evaluator = HumanEvalEvaluator(model_name=model_path)
+        evaluator = HumanEvalEvaluator(model_name=evaluation_model_path)
         result = evaluator.evaluate(subset_size=args.eval_subset_size)
         results["humaneval"] = result
         logger.info(f"HumanEval Pass@1: {result.accuracy:.2%}")
@@ -334,7 +374,7 @@ def run_evaluation(config, model_path, args):
     for name, result in results.items():
         result.save(f"{config.general.output_dir}/{name}_results.json")
     
-    return results
+    return results, selection_metadata
 
 
 def main():
@@ -424,6 +464,12 @@ def main():
         choices=["dpo", "grpo", "best"],
         help="Training method: dpo, grpo, or best (SFT -> DPO -> GRPO)",
     )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Optional explicit run name for the pipeline artifact directory",
+    )
     
     args = parser.parse_args()
     
@@ -431,11 +477,29 @@ def main():
     config = OmegaConf.load(args.config)
     training_method = args.training_method or str(config.training.get("method", "best"))
 
+    config_payload = OmegaConf.to_container(config, resolve=True)
+    run_artifacts = RunArtifacts(
+        root_output_dir=str(config.general.output_dir),
+        dataset=args.dataset,
+        training_method=training_method,
+        config=config_payload,
+        run_name=args.run_name,
+    )
+    config.general.output_dir = str(run_artifacts.run_dir)
+    run_artifacts.add_note(
+        "Inspired by contemporary experiment-management patterns used in Hydra-style "
+        "ML repos and explicit reward/post-training evaluation repos."
+    )
+    if not bool(config.orchestration.kafka.get("enabled", False)):
+        run_artifacts.add_note("Kafka streaming is treated as an optional track for this run.")
+    if not bool(config.training.grpo.get("enable_ray_verification", False)):
+        run_artifacts.add_note("Ray verifier orchestration is treated as an optional track for this run.")
+
     if config.training.wandb.enabled:
         config_payload = OmegaConf.to_container(config, resolve=True)
         ensure_wandb_run(
             project=config.training.wandb.project,
-            name=f"pipeline-{args.dataset}",
+            name=f"pipeline-{args.dataset}-{run_artifacts.manifest.run_id}",
             mode=config.training.wandb.mode,
             config=config_payload,
             tags=["pipeline", args.dataset],
@@ -452,21 +516,42 @@ def main():
     logger.info("Starting Distributed Reasoning Loop Pipeline")
     logger.info(f"Dataset: {args.dataset}")
     logger.info(f"Config: {args.config}")
+    logger.info(f"Run directory: {run_artifacts.run_dir}")
     
     # Phase 1: Data Generation
     if not args.skip_generation and not args.data_path:
         samples, pairs = run_data_generation(config, args)
         data_path = f"{config.general.output_dir}/synthetic_data/dpo_pairs.jsonl"
         correct_data_path = f"{config.general.output_dir}/synthetic_data/correct_samples.jsonl"
+        run_artifacts.record_artifact(
+            stage="generation",
+            name="synthetic_data_dir",
+            path=f"{config.general.output_dir}/synthetic_data",
+            metadata={
+                "sample_count": len(samples),
+                "pair_count": len(pairs),
+            },
+        )
     else:
         data_path = args.data_path or f"{config.general.output_dir}/synthetic_data/dpo_pairs.jsonl"
         correct_data_path = args.data_path.replace("dpo_pairs", "correct_samples") if args.data_path else None
+        run_artifacts.record_artifact(
+            stage="generation",
+            name="reused_data_path",
+            path=data_path,
+            metadata={"reused": True},
+        )
     
     # Phase 2a: SFT (optional, disabled by default)
     sft_model = None
     run_sft = (args.run_sft or training_method == "best") and not args.skip_sft
     if run_sft and correct_data_path and Path(correct_data_path).exists():
         sft_model = run_sft_training(config, correct_data_path, args.dataset)
+        run_artifacts.record_artifact(
+            stage="training",
+            name="sft_model",
+            path=sft_model,
+        )
     
     # Phase 2b: DPO/GRPO Training
     if not args.skip_dpo and not args.model_path:
@@ -475,17 +560,68 @@ def main():
         elif training_method == "best":
             dpo_base_model = sft_model or config.data_generator.student_model
             dpo_model = run_dpo_training(config, data_path, args.dataset, dpo_base_model)
+            run_artifacts.record_artifact(
+                stage="training",
+                name="dpo_model",
+                path=dpo_model,
+            )
             model_path = run_grpo_training(config, data_path, args.dataset, dpo_model)
         else:
             model_path = run_dpo_training(config, data_path, args.dataset, sft_model)
     else:
         model_path = args.model_path or config.data_generator.student_model
+    run_artifacts.record_artifact(
+        stage="training",
+        name="selected_model",
+        path=model_path,
+        metadata={"training_method": training_method},
+    )
     
     # Phase 3: Evaluation
+    results = {}
     if not args.skip_eval:
-        results = run_evaluation(config, model_path, args)
+        results, selection_metadata = run_evaluation(config, model_path, args)
+        for benchmark_name, result in results.items():
+            run_artifacts.record_metric(f"{benchmark_name}_accuracy", result.accuracy)
+            run_artifacts.record_metric(f"{benchmark_name}_errors", result.errors)
+            result_path = Path(config.general.output_dir) / f"{benchmark_name}_results.json"
+            run_artifacts.record_artifact(
+                stage="evaluation",
+                name=f"{benchmark_name}_results",
+                path=result_path,
+                metadata=result.to_dict(),
+            )
+        run_artifacts.record_artifact(
+            stage="evaluation",
+            name="selected_eval_model",
+            path=selection_metadata["selected_model_path"],
+            metadata=selection_metadata,
+        )
     
     elapsed = time.time() - start_time
+    summary = {
+        "dataset": args.dataset,
+        "training_method": training_method,
+        "model_path": model_path,
+        "evaluation_model_path": (
+            selection_metadata["selected_model_path"]
+            if not args.skip_eval
+            else model_path
+        ),
+        "elapsed_minutes": elapsed / 60.0,
+        "evaluation": {
+            name: result.to_dict()
+            for name, result in results.items()
+        } if not args.skip_eval else {},
+    }
+    with open(Path(config.general.output_dir) / "pipeline_summary.json", "w") as f:
+        json.dump(summary, f, indent=2)
+    run_artifacts.record_artifact(
+        stage="pipeline",
+        name="pipeline_summary",
+        path=Path(config.general.output_dir) / "pipeline_summary.json",
+    )
+    run_artifacts.finalize("completed", summary=summary)
     logger.info("=" * 50)
     logger.info(f"Pipeline complete! Total time: {elapsed/60:.1f} minutes")
     logger.info("=" * 50)

@@ -57,6 +57,10 @@ def test_pipeline_generate_train_eval_end_to_end(monkeypatch, tmp_path):
         tensor_parallel_size: int = 1
         gpu_memory_utilization: float = 0.9
 
+    class FakePreprocessConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
     class FakeSample:
         def __init__(self, idx: int):
             self.idx = idx
@@ -85,10 +89,11 @@ def test_pipeline_generate_train_eval_end_to_end(monkeypatch, tmp_path):
             }
 
     class FakeSyntheticDataPipeline:
-        def __init__(self, generator_config, dataset_name, output_dir):
+        def __init__(self, generator_config, dataset_name, output_dir, preprocess_config=None):
             self.generator_config = generator_config
             self.dataset_name = dataset_name
             self.output_dir = Path(output_dir)
+            self.preprocess_config = preprocess_config
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
         def run(self, subset_size, batch_size):
@@ -123,6 +128,7 @@ def test_pipeline_generate_train_eval_end_to_end(monkeypatch, tmp_path):
             return samples, pairs
 
     fake_data_generator.GenerationConfig = FakeGenerationConfig
+    fake_data_generator.PreprocessConfig = FakePreprocessConfig
     fake_data_generator.SyntheticDataPipeline = FakeSyntheticDataPipeline
     monkeypatch.setitem(sys.modules, "data_generator", fake_data_generator)
 
@@ -188,10 +194,26 @@ def test_pipeline_generate_train_eval_end_to_end(monkeypatch, tmp_path):
     class FakeEvalResult:
         def __init__(self, accuracy):
             self.accuracy = accuracy
+            self.errors = 0
 
         def save(self, path):
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_text(json.dumps({"summary": {"accuracy": self.accuracy}}))
+
+        def to_dict(self):
+            return {
+                "benchmark": "GSM8K",
+                "total": 10,
+                "completed": 10,
+                "correct": 7,
+                "incorrect": 3,
+                "errors": 0,
+                "accuracy": self.accuracy,
+                "avg_time": 1.0,
+                "success_rate": 1.0,
+                "status": "success",
+                "valid_run": True,
+            }
 
     class FakeGSM8KEvaluator:
         def __init__(self, model_name, use_test_time_compute, ttc_samples):
@@ -295,5 +317,300 @@ def test_pipeline_generate_train_eval_end_to_end(monkeypatch, tmp_path):
     assert state["dpo_train_rows"] == 10
     assert state["eval_called"] is True
 
-    assert (tmp_path / "outputs" / "dpo_model" / "fake_dpo_done.txt").exists()
-    assert (tmp_path / "outputs" / "gsm8k_results.json").exists()
+    latest_run = json.loads((tmp_path / "outputs" / "latest_run.json").read_text())
+    run_dir = Path(latest_run["run_dir"])
+
+    assert (run_dir / "dpo_model" / "fake_dpo_done.txt").exists()
+    assert (run_dir / "gsm8k_results.json").exists()
+    assert (run_dir / "pipeline_summary.json").exists()
+    assert (run_dir / "run_manifest.json").exists()
+
+
+def test_pipeline_prefers_best_checkpoint_for_final_evaluation(monkeypatch, tmp_path):
+    state = {"eval_model_name": None}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "wandb_utils",
+        types.SimpleNamespace(ensure_wandb_run=lambda *args, **kwargs: None, get_wandb=lambda: None),
+    )
+
+    fake_data_generator = types.ModuleType("data_generator")
+
+    @dataclass
+    class FakeGenerationConfig:
+        model_name: str
+        backend: str
+        num_paths: int
+        max_new_tokens: int
+        temperature: float
+        top_p: float = 0.95
+        tensor_parallel_size: int = 1
+        gpu_memory_utilization: float = 0.9
+
+    class FakePreprocessConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeSample:
+        def __init__(self, idx: int):
+            self.idx = idx
+
+        def to_dict(self):
+            return {
+                "problem_id": f"p{self.idx}",
+                "problem": f"What is {self.idx}+{self.idx}?",
+                "reasoning": f"Compute {self.idx}+{self.idx} = {self.idx * 2}. #### {self.idx * 2}",
+                "path_hash": f"h{self.idx}",
+                "final_answer": str(self.idx * 2),
+                "expected_answer": str(self.idx * 2),
+                "is_correct": True,
+            }
+
+    class FakePair:
+        def __init__(self, idx: int):
+            self.idx = idx
+
+        def to_dict(self):
+            return {
+                "problem_id": f"p{self.idx}",
+                "problem": f"What is {self.idx}+{self.idx}?",
+                "chosen": f"Correct reasoning for {self.idx}",
+                "rejected": f"Wrong reasoning for {self.idx}",
+            }
+
+    class FakeSyntheticDataPipeline:
+        def __init__(self, generator_config, dataset_name, output_dir, preprocess_config=None):
+            self.output_dir = Path(output_dir)
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        def run(self, subset_size, batch_size):
+            samples = [FakeSample(i) for i in range(4)]
+            pairs = [FakePair(i) for i in range(4)]
+            with (self.output_dir / "dpo_pairs.jsonl").open("w") as handle:
+                for pair in pairs:
+                    row = pair.to_dict()
+                    handle.write(json.dumps({"prompt": row["problem"], "chosen": row["chosen"], "rejected": row["rejected"]}) + "\n")
+            with (self.output_dir / "correct_samples.jsonl").open("w") as handle:
+                for sample in samples:
+                    handle.write(json.dumps(sample.to_dict()) + "\n")
+            return samples, pairs
+
+    fake_data_generator.GenerationConfig = FakeGenerationConfig
+    fake_data_generator.PreprocessConfig = FakePreprocessConfig
+    fake_data_generator.SyntheticDataPipeline = FakeSyntheticDataPipeline
+    monkeypatch.setitem(sys.modules, "data_generator", fake_data_generator)
+
+    fake_cot_generator = types.ModuleType("data_generator.cot_generator")
+    fake_cot_generator.InferenceBackend = types.SimpleNamespace(VLLM="vllm")
+    monkeypatch.setitem(sys.modules, "data_generator.cot_generator", fake_cot_generator)
+
+    fake_training = types.ModuleType("training")
+
+    @dataclass
+    class FakeDPOTrainerConfig:
+        model_name: str
+        beta: float
+        learning_rate: float
+        batch_size: int
+        num_epochs: int
+        max_length: int
+        output_dir: str
+
+    class FakeReasoningDPOTrainer:
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+        def train(self, data):
+            Path(self.cfg.output_dir).mkdir(parents=True, exist_ok=True)
+            (Path(self.cfg.output_dir) / "fake_dpo_done.txt").write_text("ok")
+
+    @dataclass
+    class FakeSFTTrainerConfig:
+        model_name: str
+        learning_rate: float
+        batch_size: int
+        num_epochs: int
+        output_dir: str
+
+    class FakeSFTFromSyntheticData:
+        def __init__(self, cfg, data_path):
+            self.cfg = cfg
+
+        def train(self):
+            Path(self.cfg.output_dir).mkdir(parents=True, exist_ok=True)
+            (Path(self.cfg.output_dir) / "fake_sft_done.txt").write_text("ok")
+
+    fake_training.DPOTrainerConfig = FakeDPOTrainerConfig
+    fake_training.ReasoningDPOTrainer = FakeReasoningDPOTrainer
+    fake_training.SFTTrainerConfig = FakeSFTTrainerConfig
+    fake_training.SFTFromSyntheticData = FakeSFTFromSyntheticData
+    monkeypatch.setitem(sys.modules, "training", fake_training)
+
+    fake_grpo_trainer = types.ModuleType("training.grpo_trainer")
+
+    @dataclass
+    class FakeGRPOConfig:
+        model_name: str
+        learning_rate: float
+        batch_size: int
+        num_epochs: int
+        max_length: int
+        group_size: int
+        verifier_type: str
+        verifier_timeout: int
+        code_docker_image: str
+        code_memory_limit: str
+        kl_threshold: float
+        eval_interval_steps: int
+        heldout_eval_size: int
+        heldout_dataset: str
+        eval_max_new_tokens: int
+        save_best_checkpoint: bool
+        best_checkpoint_metric: str
+        min_eval_improvement: float
+        early_stop_patience: int
+        online_max_new_tokens: int
+        online_temperature: float
+        online_top_p: float
+        online_resample_attempts: int
+        online_min_reward_std: float
+        enable_ray_verification: bool
+        ray_verifier_workers: int
+        prompt_problem_type: str
+        wandb_project: str
+        wandb_mode: str
+        output_dir: str
+
+    class FakeReasoningGRPOTrainer:
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+        def train(self, data):
+            output_dir = Path(self.cfg.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "fake_grpo_done.txt").write_text("ok")
+            best_dir = output_dir / "best_checkpoint"
+            best_dir.mkdir(parents=True, exist_ok=True)
+            (best_dir / "best_marker.txt").write_text("best")
+
+    fake_grpo_trainer.GRPOConfig = FakeGRPOConfig
+    fake_grpo_trainer.ReasoningGRPOTrainer = FakeReasoningGRPOTrainer
+    monkeypatch.setitem(sys.modules, "training.grpo_trainer", fake_grpo_trainer)
+
+    fake_evaluation = types.ModuleType("evaluation")
+
+    class FakeEvalResult:
+        def __init__(self, accuracy):
+            self.accuracy = accuracy
+            self.errors = 0
+
+        def save(self, path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text(json.dumps({"summary": {"accuracy": self.accuracy}}))
+
+        def to_dict(self):
+            return {
+                "benchmark": "GSM8K",
+                "total": 4,
+                "completed": 4,
+                "correct": 3,
+                "incorrect": 1,
+                "errors": 0,
+                "accuracy": self.accuracy,
+                "avg_time": 1.0,
+                "success_rate": 1.0,
+                "status": "success",
+                "valid_run": True,
+            }
+
+    class FakeGSM8KEvaluator:
+        def __init__(self, model_name, use_test_time_compute, ttc_samples):
+            state["eval_model_name"] = model_name
+
+        def evaluate(self, subset_size):
+            return FakeEvalResult(accuracy=0.75)
+
+    fake_evaluation.GSM8KEvaluator = FakeGSM8KEvaluator
+    fake_evaluation.HumanEvalEvaluator = object
+    fake_evaluation.MATHEvaluator = object
+    monkeypatch.setitem(sys.modules, "evaluation", fake_evaluation)
+
+    config = OmegaConf.create(
+        {
+            "data_generator": {
+                "teacher_model": "teacher",
+                "student_model": "student",
+                "backend": "vllm",
+                "tensor_parallel_size": "auto",
+                "gpu_memory_utilization": 0.9,
+                "num_cot_paths": 2,
+                "max_new_tokens": 32,
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "preprocessing": {},
+            },
+            "verifier": {
+                "type": "math",
+                "math": {"timeout": 1},
+                "code": {"timeout": 1, "docker_image": "sandbox", "memory_limit": "256m"},
+            },
+            "orchestration": {
+                "kafka": {
+                    "enabled": False,
+                    "bootstrap_servers": ["localhost:9092"],
+                    "topics": {
+                        "raw_reasoning_data": "raw_reasoning_data",
+                        "verified_paths": "verified_paths",
+                        "training_data": "training_data",
+                    },
+                }
+            },
+            "training": {
+                "method": "best",
+                "batch_size": 2,
+                "learning_rate": 1e-6,
+                "num_epochs": 1,
+                "dpo": {"beta": 0.1, "max_length": 128},
+                "grpo": {
+                    "group_size": 4,
+                    "kl_threshold": 0.1,
+                    "eval_interval_steps": 10,
+                    "heldout_eval_size": 5,
+                    "heldout_dataset": "gsm8k",
+                    "eval_max_new_tokens": 64,
+                    "save_best_checkpoint": True,
+                    "best_checkpoint_metric": "pass_at_1",
+                    "min_eval_improvement": 0.0001,
+                    "early_stop_patience": 2,
+                    "online_max_new_tokens": 64,
+                    "online_temperature": 0.8,
+                    "online_top_p": 0.95,
+                    "online_resample_attempts": 1,
+                    "online_min_reward_std": 1e-6,
+                    "enable_ray_verification": False,
+                    "ray_verifier_workers": 1,
+                },
+                "evaluation": {"num_paths": 2, "oracle_verify": False},
+                "wandb": {"enabled": False, "project": "test-project", "mode": "offline"},
+            },
+            "general": {"output_dir": str(tmp_path / "outputs")},
+        }
+    )
+
+    pipeline_module = _load_run_pipeline_module()
+    monkeypatch.setattr(pipeline_module.OmegaConf, "load", lambda _: config)
+
+    argv = [
+        "run_pipeline.py",
+        "--config", "ignored.yaml",
+        "--dataset", "gsm8k",
+        "--subset-size", "4",
+        "--training-method", "best",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    pipeline_module.main()
+
+    assert state["eval_model_name"] is not None
+    assert state["eval_model_name"].endswith("best_checkpoint")
