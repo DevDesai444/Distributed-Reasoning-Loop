@@ -327,6 +327,12 @@ class MathVerifier:
         # Extract final answers if full reasoning paths provided
         pred_answer = self._coerce_to_answer(predicted)
         exp_answer = self._coerce_to_answer(expected)
+
+        # For numeric tasks, salvage the final numeric candidate from noisy text.
+        if self.parse_numeric(exp_answer) is not None and self.parse_numeric(pred_answer) is None:
+            numeric_candidate = self._extract_last_numeric_candidate(predicted)
+            if numeric_candidate is not None:
+                pred_answer = numeric_candidate
         
         # Normalize both answers
         pred_norm = self.normalize_answer(pred_answer)
@@ -386,6 +392,11 @@ class MathVerifier:
         final_answer = self.extract_final_answer(reasoning)
         
         if final_answer is None:
+            numeric_candidate = None
+            if self.parse_numeric(expected_answer) is not None:
+                numeric_candidate = self._extract_last_numeric_candidate(reasoning)
+            if numeric_candidate is not None:
+                return self.verify(numeric_candidate, expected_answer)
             return VerificationResult(
                 status=VerificationStatus.PARSE_ERROR,
                 expected=expected_answer,
