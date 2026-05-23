@@ -298,6 +298,7 @@ class SyntheticDataPipeline:
         problems = self.dataset_loader.load()
         if subset_size:
             problems = problems[:subset_size]
+        self._save_problem_manifest(problems)
         
         self.stats["total_problems"] = len(problems)
         logger.info(f"Processing {len(problems)} problems from {self.dataset_name}")
@@ -425,6 +426,16 @@ class SyntheticDataPipeline:
         with open(checkpoint_dir / f"pairs_{step}.jsonl", "w") as f:
             for pair in pairs:
                 f.write(json.dumps(pair.to_dict()) + "\n")
+
+    def _save_problem_manifest(self, problems: List[Problem]) -> None:
+        manifest = {
+            "dataset": self.dataset_name,
+            "split": getattr(self.dataset_loader, "split", None),
+            "problem_count": len(problems),
+            "problem_ids": [problem.id for problem in problems],
+        }
+        with open(self.output_dir / "problem_manifest.json", "w") as handle:
+            json.dump(manifest, handle, indent=2)
     
     def _save_results(
         self,

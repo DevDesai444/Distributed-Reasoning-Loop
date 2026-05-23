@@ -213,6 +213,7 @@ def main():
         "dpo_pairs.jsonl",
         "full_pairs.jsonl",
         "smart_pairs.jsonl",
+        "problem_manifest.json",
         "stats.json",
         "preprocess_stats.json",
         "pair_quality_summary.json",
