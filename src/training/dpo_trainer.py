@@ -13,6 +13,8 @@ import json
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+from prompting import format_prompt
+
 from .runtime_utils import (
     build_causal_lm_load_kwargs,
     get_runtime_dtype,
@@ -45,6 +47,7 @@ class DPOTrainerConfig:
     # Sequence lengths
     max_length: int = 2048
     max_prompt_length: int = 512
+    problem_type: str = "math"
     
     # LoRA (optional)
     use_lora: bool = True
@@ -226,9 +229,25 @@ class ReasoningDPOTrainer:
             
             self.setup()
             
-            # Create HuggingFace datasets
-            train_dataset = HFDataset.from_list(train_data)
-            eval_dataset = HFDataset.from_list(eval_data) if eval_data else None
+            def _format_pair(item: Dict[str, str]) -> Dict[str, str]:
+                prompt = item.get("prompt", item.get("problem", ""))
+                return {
+                    "prompt": format_prompt(
+                        self.tokenizer,
+                        prompt,
+                        problem_type=self.config.problem_type,
+                    ),
+                    "chosen": item.get("chosen", ""),
+                    "rejected": item.get("rejected", ""),
+                }
+
+            # Create HuggingFace datasets with prompt formatting aligned to inference.
+            train_dataset = HFDataset.from_list([_format_pair(item) for item in train_data])
+            eval_dataset = (
+                HFDataset.from_list([_format_pair(item) for item in eval_data])
+                if eval_data
+                else None
+            )
             
             # DPO training config
             training_args = DPOConfig(
