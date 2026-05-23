@@ -943,6 +943,18 @@ class ReasoningGRPOTrainer:
         with open(selection_dir / "checkpoint_selection.json", "w") as handle:
             json.dump(selection_state, handle, indent=2)
 
+    def _write_best_checkpoint_manifest(self, best_dir: Path, step: int, score: float) -> None:
+        manifest = {
+            "stage": "grpo_best_checkpoint",
+            "selection_metric": self.config.best_checkpoint_metric,
+            "selection_score": score,
+            "selection_step": step,
+            "heldout_dataset": self.config.heldout_dataset,
+            "heldout_split": self.config.heldout_split,
+        }
+        with open(best_dir / "stage_manifest.json", "w") as handle:
+            json.dump(manifest, handle, indent=2)
+
     def _maybe_update_best_checkpoint(
         self,
         step: int,
@@ -966,6 +978,7 @@ class ReasoningGRPOTrainer:
             if self.config.save_best_checkpoint:
                 best_dir = Path(self.config.output_dir) / "best_checkpoint"
                 self.save(best_dir, merge_lora=False)
+                self._write_best_checkpoint_manifest(best_dir, step, score)
             self._write_selection_state()
             logger.info(
                 "New best GRPO checkpoint at step %s with held-out %s %.4f",
