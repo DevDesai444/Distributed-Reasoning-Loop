@@ -78,14 +78,18 @@ class RunArtifacts:
         pipeline: str = "distributed_reasoning_loop",
         config: Optional[Dict[str, Any]] = None,
         run_name: Optional[str] = None,
+        nested: bool = True,
     ):
         root = Path(root_output_dir)
-        runs_root = root / "runs"
-        runs_root.mkdir(parents=True, exist_ok=True)
-
         normalized_name = run_name.strip().replace(" ", "_") if run_name else None
         run_id = normalized_name or f"{_utc_timestamp()}-{dataset}-{training_method}"
-        self.run_dir = runs_root / run_id
+        if nested:
+            runs_root = root / "runs"
+            runs_root.mkdir(parents=True, exist_ok=True)
+            self.run_dir = runs_root / run_id
+        else:
+            root.mkdir(parents=True, exist_ok=True)
+            self.run_dir = root
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
         self.manifest = RunManifest(

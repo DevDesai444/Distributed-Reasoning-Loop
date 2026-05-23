@@ -39,3 +39,25 @@ def test_run_artifacts_create_manifest_and_latest_pointer(tmp_path):
     assert manifest["metrics"]["gsm8k_accuracy"] == 0.71
     assert latest["run_dir"] == str(manager.run_dir.resolve())
     assert summary["accuracy"] == 0.71
+
+
+def test_run_artifacts_can_attach_to_flat_output_directory(tmp_path):
+    outputs_dir = tmp_path / "benchmark_results"
+    manager = RunArtifacts(
+        root_output_dir=str(outputs_dir),
+        dataset="gsm8k",
+        training_method="evaluation",
+        config={"subset_size": 100},
+        nested=False,
+    )
+
+    manager.record_metric("gsm8k_accuracy", 0.71)
+    manager.finalize("completed", summary={"valid_run": True})
+
+    manifest = json.loads((outputs_dir / "run_manifest.json").read_text())
+    latest = json.loads((outputs_dir / "latest_run.json").read_text())
+    summary = json.loads((outputs_dir / "run_summary.json").read_text())
+
+    assert manifest["run_dir"] == str(outputs_dir.resolve())
+    assert latest["run_dir"] == str(outputs_dir.resolve())
+    assert summary["valid_run"] is True
