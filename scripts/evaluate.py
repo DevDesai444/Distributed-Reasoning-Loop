@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from run_artifacts import RunArtifacts
 from tracks import apply_track_policy
 
 logging.basicConfig(
@@ -59,9 +60,36 @@ def persist_run_manifest(output_dir: str, metadata: dict) -> None:
         json.dump(metadata, f, indent=2)
 
 
+def record_benchmark_result(
+    manager: RunArtifacts,
+    *,
+    benchmark_name: str,
+    result,
+    output_path: str,
+) -> None:
+    manager.record_metric(f"{benchmark_name}_accuracy", result.accuracy)
+    manager.record_metric(f"{benchmark_name}_errors", result.errors)
+    manager.record_artifact(
+        stage="evaluation",
+        name=f"{benchmark_name}_results",
+        path=output_path,
+        metadata=result.to_dict(),
+    )
+
+
+def summarize_suite_status(results: dict) -> str:
+    statuses = [result.status for result in results.values()]
+    if not statuses:
+        return "empty"
+    if any(status == "failed" for status in statuses):
+        return "failed"
+    if any(status == "partial" for status in statuses):
+        return "partial"
+    return "completed"
+
+
 def finalize_result(result, output_path: str, output_dir: str, fail_on_errors: bool) -> int:
     result.save(output_path)
-    persist_run_manifest(output_dir, result.metadata)
 
     if result.status == "failed":
         logger.error(
@@ -167,6 +195,14 @@ def main():
     run_metadata = build_run_metadata(args)
     if track_policy is not None:
         run_metadata["enabled_optional_tracks"] = track_policy.enabled_optional_tracks()
+    run_artifacts = RunArtifacts(
+        root_output_dir=args.output_dir,
+        dataset=args.benchmark,
+        training_method="evaluation",
+        pipeline="benchmark_evaluation",
+        config=run_metadata,
+        nested=False,
+    )
     
     logger.info(f"Evaluating model: {args.model}")
     logger.info(f"Benchmark: {args.benchmark}")
@@ -187,8 +223,22 @@ def main():
         for name, result in results.items():
             logger.info(f"{name}: {result.accuracy:.2%} accuracy")
             logger.info(f"{name}: status={result.status} valid_run={result.valid_run}")
+            output_path = f"{args.output_dir}/{name}_results.json"
+            record_benchmark_result(
+                run_artifacts,
+                benchmark_name=name,
+                result=result,
+                output_path=output_path,
+            )
 
         persist_run_manifest(args.output_dir, run_metadata)
+        run_artifacts.finalize(
+            summarize_suite_status(results),
+            summary={
+                name: result.to_dict()
+                for name, result in results.items()
+            },
+        )
         if any(result.status == "failed" for result in results.values()):
             raise SystemExit(2)
         if args.fail_on_errors and any(result.errors > 0 for result in results.values()):
@@ -212,6 +262,13 @@ def main():
             args.output_dir,
             args.fail_on_errors,
         )
+        record_benchmark_result(
+            run_artifacts,
+            benchmark_name="gsm8k",
+            result=result,
+            output_path=f"{args.output_dir}/gsm8k_results.json",
+        )
+        run_artifacts.finalize(result.status, summary=result.to_dict())
         
         logger.info(f"GSM8K Results:")
         logger.info(f"  Accuracy: {result.accuracy:.2%}")
@@ -233,6 +290,13 @@ def main():
             args.output_dir,
             args.fail_on_errors,
         )
+        record_benchmark_result(
+            run_artifacts,
+            benchmark_name="humaneval",
+            result=result,
+            output_path=f"{args.output_dir}/humaneval_results.json",
+        )
+        run_artifacts.finalize(result.status, summary=result.to_dict())
         
         logger.info(f"HumanEval Results:")
         logger.info(f"  Pass@1: {result.accuracy:.2%}")
@@ -258,6 +322,13 @@ def main():
             args.output_dir,
             args.fail_on_errors,
         )
+        record_benchmark_result(
+            run_artifacts,
+            benchmark_name="math",
+            result=result,
+            output_path=f"{args.output_dir}/math_results.json",
+        )
+        run_artifacts.finalize(result.status, summary=result.to_dict())
         
         logger.info(f"MATH Results:")
         logger.info(f"  Accuracy: {result.accuracy:.2%}")

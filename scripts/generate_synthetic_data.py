@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from data_generator import SyntheticDataPipeline, GenerationConfig, PreprocessConfig
 from omegaconf import OmegaConf
+from run_artifacts import RunArtifacts
 from tracks import apply_track_policy
 
 logging.basicConfig(
@@ -124,8 +125,17 @@ def main():
     else:
         config = OmegaConf.create({})
     track_policy = apply_track_policy(config)
+    config_payload = OmegaConf.to_container(config, resolve=True)
     
     data_cfg = config.get("data_generator", {})
+    run_artifacts = RunArtifacts(
+        root_output_dir=args.output_dir,
+        dataset=args.dataset,
+        training_method="data_generation",
+        pipeline="synthetic_data_generation",
+        config=config_payload,
+        nested=False,
+    )
 
     # Override with command line args
     model_name = args.model or data_cfg.get(
@@ -192,6 +202,41 @@ def main():
     samples, pairs = pipeline.run(
         subset_size=args.subset_size,
         batch_size=args.batch_size,
+    )
+
+    output_dir = Path(args.output_dir)
+    for artifact_name in [
+        "all_samples.jsonl",
+        "filtered_samples.jsonl",
+        "correct_samples.jsonl",
+        "incorrect_samples.jsonl",
+        "dpo_pairs.jsonl",
+        "full_pairs.jsonl",
+        "smart_pairs.jsonl",
+        "stats.json",
+        "preprocess_stats.json",
+        "pair_quality_summary.json",
+    ]:
+        artifact_path = output_dir / artifact_name
+        if artifact_path.exists():
+            run_artifacts.record_artifact(
+                stage="generation",
+                name=artifact_name,
+                path=artifact_path,
+            )
+
+    correct_count = sum(1 for sample in samples if sample.is_correct)
+    run_artifacts.record_metric("sample_count", len(samples))
+    run_artifacts.record_metric("correct_sample_count", correct_count)
+    run_artifacts.record_metric("pair_count", len(pairs))
+    run_artifacts.finalize(
+        "completed",
+        summary={
+            "sample_count": len(samples),
+            "correct_sample_count": correct_count,
+            "pair_count": len(pairs),
+            "enabled_optional_tracks": track_policy.enabled_optional_tracks(),
+        },
     )
     
     logger.info(f"Generation complete!")
