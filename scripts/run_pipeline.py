@@ -105,6 +105,14 @@ def _construct_with_supported_kwargs(factory, **kwargs):
     return factory(**supported)
 
 
+def write_stage_manifest(stage_dir: str, payload: Dict[str, Any]) -> None:
+    """Persist stage-local lineage next to a generated dataset or model directory."""
+    path = Path(stage_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    with open(path / "stage_manifest.json", "w") as handle:
+        json.dump(payload, handle, indent=2)
+
+
 def resolve_evaluation_model_path(config, model_path: str) -> tuple[str, Dict[str, Any]]:
     """
     Choose the most appropriate checkpoint for final evaluation.
@@ -252,6 +260,15 @@ def run_sft_training(config, data_path, dataset_name):
     
     trainer = SFTFromSyntheticData(sft_config, data_path)
     trainer.train()
+    write_stage_manifest(
+        sft_config.output_dir,
+        {
+            "stage": "sft",
+            "base_model": config.data_generator.student_model,
+            "source_data": str(Path(data_path).resolve()),
+            "problem_type": _dataset_problem_type(dataset_name),
+        },
+    )
     
     return sft_config.output_dir
 
@@ -287,6 +304,16 @@ def run_dpo_training(config, data_path, dataset_name, base_model=None):
     
     trainer = ReasoningDPOTrainer(dpo_config)
     trainer.train(data)
+    write_stage_manifest(
+        dpo_config.output_dir,
+        {
+            "stage": "dpo",
+            "base_model": model_name,
+            "source_data": str(Path(data_path).resolve()),
+            "pair_count": len(data),
+            "problem_type": _dataset_problem_type(dataset_name),
+        },
+    )
     
     return dpo_config.output_dir
 
@@ -344,6 +371,17 @@ def run_grpo_training(config, data_path, dataset_name, base_model=None):
     
     trainer = ReasoningGRPOTrainer(grpo_config)
     trainer.train(data)
+    write_stage_manifest(
+        grpo_config.output_dir,
+        {
+            "stage": "grpo",
+            "base_model": model_name,
+            "source_data": str(Path(data_path).resolve()),
+            "pair_count": len(data),
+            "heldout_dataset": config.training.grpo.heldout_dataset,
+            "problem_type": _dataset_problem_type(dataset_name),
+        },
+    )
     
     return grpo_config.output_dir
 
