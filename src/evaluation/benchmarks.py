@@ -69,6 +69,17 @@ class BaseEvaluator:
     
     def setup(self):
         """Initialize components."""
+        if self.use_test_time_compute:
+            from .test_time_compute import TestTimeCompute, TestTimeComputeConfig
+            ttc_config = TestTimeComputeConfig(
+                num_samples=self.ttc_samples,
+                oracle_verify=self.ttc_oracle_verify,
+            )
+            self.ttc = TestTimeCompute(self.model_name, ttc_config)
+            # TTC owns generation, so avoid loading a duplicate vLLM engine here.
+            self.ttc.setup()
+            return
+
         try:
             from data_generator import CoTGenerator, GenerationConfig
         except ImportError:
@@ -80,14 +91,6 @@ class BaseEvaluator:
         )
         self.generator = CoTGenerator(config)
         self.generator.initialize()
-        
-        if self.use_test_time_compute:
-            from .test_time_compute import TestTimeCompute, TestTimeComputeConfig
-            ttc_config = TestTimeComputeConfig(
-                num_samples=self.ttc_samples,
-                oracle_verify=self.ttc_oracle_verify,
-            )
-            self.ttc = TestTimeCompute(self.model_name, ttc_config)
     
     def evaluate(self, problems: List[Dict[str, Any]]) -> BenchmarkResult:
         """Evaluate on a list of problems."""

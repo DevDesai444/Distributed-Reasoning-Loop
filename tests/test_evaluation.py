@@ -13,6 +13,62 @@ from evaluation.test_time_compute import GeneratedPath, TestTimeCompute, TestTim
 from verifier import GSM8KVerifier
 
 
+def test_base_evaluator_setup_skips_standard_generator_in_ttc_mode(monkeypatch):
+    calls = {"generator_init": 0, "ttc_setup": 0}
+
+    class FakeCoTGenerator:
+        def __init__(self, config):
+            calls["generator_init"] += 1
+
+        def initialize(self):
+            calls["generator_init"] += 100
+
+    class FakeGenerationConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeTTC:
+        def __init__(self, model_name, config):
+            self.model_name = model_name
+            self.config = config
+
+        def setup(self):
+            calls["ttc_setup"] += 1
+
+    monkeypatch.setitem(
+        sys.modules,
+        "data_generator",
+        types.SimpleNamespace(
+            CoTGenerator=FakeCoTGenerator,
+            GenerationConfig=FakeGenerationConfig,
+        ),
+    )
+
+    import evaluation.benchmarks as benchmarks
+
+    monkeypatch.setattr(benchmarks, "TestTimeCompute", FakeTTC, raising=False)
+    monkeypatch.setattr(
+        benchmarks,
+        "TestTimeComputeConfig",
+        lambda **kwargs: types.SimpleNamespace(**kwargs),
+        raising=False,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "evaluation.test_time_compute",
+        types.SimpleNamespace(
+            TestTimeCompute=FakeTTC,
+            TestTimeComputeConfig=lambda **kwargs: types.SimpleNamespace(**kwargs),
+        ),
+    )
+
+    evaluator = GSM8KEvaluator("dummy-model", use_test_time_compute=True, ttc_samples=3)
+    evaluator.setup()
+
+    assert calls["generator_init"] == 0
+    assert calls["ttc_setup"] == 1
+
+
 def test_ttc_weighted_vote_prefers_consensus_answer():
     ttc = TestTimeCompute(
         "dummy-model",
