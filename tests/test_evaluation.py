@@ -222,3 +222,43 @@ def test_gsm8k_evaluator_ttc_can_use_ground_truth_in_explicit_oracle_mode(monkey
 
     assert captured["expected_answer"] == "4"
     assert result.correct == 1
+
+
+def test_gsm8k_evaluator_records_problem_manifest_metadata(monkeypatch):
+    class FakeLoader:
+        def __init__(self, split="test", subset_size=None):
+            self.split = split
+            self.subset_size = subset_size
+
+        def load(self):
+            return [
+                types.SimpleNamespace(
+                    id="gsm8k_test_0",
+                    problem="What is 2+2?",
+                    answer="4",
+                    metadata={},
+                )
+            ]
+
+    class FakeTTC:
+        def solve(self, prompt, expected_answer=None):
+            return GeneratedPath(reasoning="Work\n#### 4", final_answer="4"), []
+
+    monkeypatch.setitem(sys.modules, "data_generator", types.SimpleNamespace(GSM8KLoader=FakeLoader))
+
+    evaluator = GSM8KEvaluator(
+        "dummy-model",
+        use_test_time_compute=True,
+        ttc_samples=2,
+        ttc_oracle_verify=False,
+    )
+    evaluator.setup = lambda: (
+        setattr(evaluator, "ttc", FakeTTC()),
+        setattr(evaluator, "verifier", GSM8KVerifier()),
+    )
+
+    result = evaluator.evaluate(split="test", subset_size=1)
+
+    assert result.metadata["split"] == "test"
+    assert result.metadata["subset_size"] == 1
+    assert result.metadata["problem_ids"] == ["gsm8k_test_0"]

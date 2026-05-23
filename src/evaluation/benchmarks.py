@@ -249,6 +249,9 @@ class GSM8KEvaluator(BaseEvaluator):
             metadata={
                 **self.run_metadata,
                 "benchmark": self.BENCHMARK_NAME,
+                "split": split,
+                "subset_size": subset_size,
+                "problem_ids": [problem.id for problem in problems],
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             },
         )
@@ -366,6 +369,8 @@ class HumanEvalEvaluator(BaseEvaluator):
             metadata={
                 **self.run_metadata,
                 "benchmark": self.BENCHMARK_NAME,
+                "subset_size": subset_size,
+                "problem_ids": [problem.id for problem in problems],
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             },
         )
@@ -497,6 +502,11 @@ class MATHEvaluator(BaseEvaluator):
             metadata={
                 **self.run_metadata,
                 "benchmark": self.BENCHMARK_NAME,
+                "split": split,
+                "difficulty": difficulty,
+                "subject": subject,
+                "subset_size": subset_size,
+                "problem_ids": [problem.id for problem in problems],
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             },
         )
