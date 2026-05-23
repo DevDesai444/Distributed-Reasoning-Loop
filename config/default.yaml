@@ -91,7 +91,7 @@ training:
     online_top_p: 0.95
     online_resample_attempts: 2
     online_min_reward_std: 1e-6
-    enable_ray_verification: true
+    enable_ray_verification: false
     ray_verifier_workers: 4
 
   reward_model:
@@ -115,9 +115,19 @@ training:
     mode: "offline"
 
 speculative_decoding:
+  enabled: false
   draft_model: "Qwen/Qwen2.5-1.5B-Instruct"
   target_model: "Qwen/Qwen2.5-7B-Instruct"
   max_speculative_tokens: 5
+
+tracks:
+  core_only: false
+  optional:
+    kafka_streaming: false
+    ray_verification: false
+    reward_model_reranking: false
+    process_reward_model_reranking: false
+    speculative_decoding: false
 
 general:
   seed: 42

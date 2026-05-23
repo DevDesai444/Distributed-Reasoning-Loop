@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from data_generator import SyntheticDataPipeline, GenerationConfig, PreprocessConfig
 from omegaconf import OmegaConf
+from tracks import apply_track_policy
 
 logging.basicConfig(
     level=logging.INFO,
@@ -122,6 +123,7 @@ def main():
         config = OmegaConf.load(args.config)
     else:
         config = OmegaConf.create({})
+    track_policy = apply_track_policy(config)
     
     data_cfg = config.get("data_generator", {})
 
@@ -177,6 +179,10 @@ def main():
     logger.info(f"Starting synthetic data generation for {args.dataset}")
     logger.info(f"Model: {model_name}")
     logger.info(f"Backend: {backend_name}")
+    logger.info(
+        "Optional tracks enabled: %s",
+        ", ".join(track_policy.enabled_optional_tracks()) or "none",
+    )
     if backend_name == "vllm":
         logger.info(f"vLLM tensor_parallel_size: {tensor_parallel_size}")
         logger.info(f"vLLM gpu_memory_utilization: {gpu_memory_utilization}")

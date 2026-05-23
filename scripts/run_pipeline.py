@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from omegaconf import OmegaConf
 from run_artifacts import RunArtifacts
+from tracks import apply_track_policy
 from wandb_utils import ensure_wandb_run, get_wandb
 
 logging.basicConfig(
@@ -475,6 +476,7 @@ def main():
     
     # Load config
     config = OmegaConf.load(args.config)
+    track_policy = apply_track_policy(config)
     training_method = args.training_method or str(config.training.get("method", "best"))
 
     config_payload = OmegaConf.to_container(config, resolve=True)
@@ -486,14 +488,13 @@ def main():
         run_name=args.run_name,
     )
     config.general.output_dir = str(run_artifacts.run_dir)
-    run_artifacts.add_note(
-        "Inspired by contemporary experiment-management patterns used in Hydra-style "
-        "ML repos and explicit reward/post-training evaluation repos."
-    )
-    if not bool(config.orchestration.kafka.get("enabled", False)):
-        run_artifacts.add_note("Kafka streaming is treated as an optional track for this run.")
-    if not bool(config.training.grpo.get("enable_ray_verification", False)):
-        run_artifacts.add_note("Ray verifier orchestration is treated as an optional track for this run.")
+    enabled_tracks = track_policy.enabled_optional_tracks()
+    if enabled_tracks:
+        run_artifacts.add_note(
+            "Enabled optional tracks: " + ", ".join(enabled_tracks)
+        )
+    else:
+        run_artifacts.add_note("Running core reasoning loop without optional tracks.")
 
     if config.training.wandb.enabled:
         config_payload = OmegaConf.to_container(config, resolve=True)

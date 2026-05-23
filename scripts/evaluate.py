@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from tracks import apply_track_policy
 
 logging.basicConfig(
     level=logging.INFO,
@@ -136,8 +137,23 @@ def main():
         action="store_true",
         help="Exit non-zero if any benchmark items error out",
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="config/default.yaml",
+        help="Configuration file used to derive optional-track policy",
+    )
     
     args = parser.parse_args()
+
+    config_path = Path(args.config)
+    if config_path.exists():
+        from omegaconf import OmegaConf
+
+        config = OmegaConf.load(config_path)
+        track_policy = apply_track_policy(config)
+    else:
+        track_policy = None
 
     from evaluation import (
         GSM8KEvaluator,
@@ -149,6 +165,8 @@ def main():
     # Create output directory
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     run_metadata = build_run_metadata(args)
+    if track_policy is not None:
+        run_metadata["enabled_optional_tracks"] = track_policy.enabled_optional_tracks()
     
     logger.info(f"Evaluating model: {args.model}")
     logger.info(f"Benchmark: {args.benchmark}")
