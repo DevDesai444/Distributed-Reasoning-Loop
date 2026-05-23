@@ -216,6 +216,7 @@ def main():
         "stats.json",
         "preprocess_stats.json",
         "pair_quality_summary.json",
+        "sample_quality_summary.json",
     ]:
         artifact_path = output_dir / artifact_name
         if artifact_path.exists():

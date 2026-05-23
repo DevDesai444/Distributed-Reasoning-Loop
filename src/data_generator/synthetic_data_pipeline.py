@@ -383,6 +383,7 @@ class SyntheticDataPipeline:
         sample_dicts = [s.to_dict() for s in all_samples]
         filtered_samples, smart_pairs = preprocessor.preprocess(sample_dicts, create_pairs=True)
         pair_quality_summary = preprocessor.summarize_pairs(smart_pairs)
+        sample_quality_summary = preprocessor.summarize_samples(filtered_samples)
         
         # Convert back and update pairs
         logger.info(f"Preprocessing: {len(all_samples)} -> {len(filtered_samples)} samples")
@@ -390,6 +391,7 @@ class SyntheticDataPipeline:
         self.stats["preprocessed_samples"] = len(filtered_samples)
         self.stats["smart_pairs_created"] = len(smart_pairs)
         self.stats["pair_quality_summary"] = pair_quality_summary
+        self.stats["sample_quality_summary"] = sample_quality_summary
         
         # Save with preprocessed data
         self._save_results(
@@ -399,6 +401,7 @@ class SyntheticDataPipeline:
             smart_pairs,
             preprocess_stats=preprocessor.get_stats(),
             pair_quality_summary=pair_quality_summary,
+            sample_quality_summary=sample_quality_summary,
         )
         
         logger.info(f"Pipeline complete. Stats: {self.stats}")
@@ -431,6 +434,7 @@ class SyntheticDataPipeline:
         smart_pairs: List[Dict] = None,
         preprocess_stats: Dict[str, Any] = None,
         pair_quality_summary: Dict[str, Any] = None,
+        sample_quality_summary: Dict[str, Any] = None,
     ):
         """Save final results."""
         # Save all samples (raw)
@@ -478,6 +482,9 @@ class SyntheticDataPipeline:
         if pair_quality_summary:
             with open(self.output_dir / "pair_quality_summary.json", "w") as f:
                 json.dump(pair_quality_summary, f, indent=2)
+        if sample_quality_summary:
+            with open(self.output_dir / "sample_quality_summary.json", "w") as f:
+                json.dump(sample_quality_summary, f, indent=2)
         
         # Save correct/incorrect samples separately
         correct = [s for s in samples if s.is_correct]

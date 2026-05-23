@@ -41,6 +41,10 @@ class PreprocessConfig:
     require_answer_disagreement_for_pairs: bool = True
     prioritize_step_aligned_pairs: bool = True
     max_pairs_per_error_type: int = 2
+    min_chosen_confidence: float = 0.5
+    min_negative_step_ratio: float = 0.5
+    min_pair_quality_score: float = 0.05
+    prefer_near_miss_negatives: bool = True
     
     # Normalization
     normalize_whitespace: bool = True
@@ -366,6 +370,9 @@ class DataPreprocessor:
         )
 
         final_answer_bonus = 0.08 if neg.get("has_final_answer", False) else -0.08
+        near_miss_bonus = 0.0
+        if self.config.prefer_near_miss_negatives:
+            near_miss_bonus = min(rejected_conf, 0.75) * 0.12
 
         score = (
             0.38 * diversity
@@ -374,6 +381,7 @@ class DataPreprocessor:
             + 0.10 * answer_disagreement
             + final_answer_bonus
             + error_type_bonus
+            + near_miss_bonus
         )
         return float(score)
     
@@ -409,6 +417,9 @@ class DataPreprocessor:
             problem_pairs = []
             
             for pos in correct:
+                if float(pos.get("verification_confidence", 0.0)) < self.config.min_chosen_confidence:
+                    self.stats["pairs_rejected_low_chosen_confidence"] += 1
+                    continue
                 for neg in incorrect:
                     pos_reasoning = pos.get("reasoning", "")
                     neg_reasoning = neg.get("reasoning", "")
@@ -430,13 +441,23 @@ class DataPreprocessor:
 
                     if (
                         self.config.prioritize_step_aligned_pairs
-                        and neg.get("reasoning_step_count", 0) == 0
-                        and neg_error_type in {"trivial_short", "missing_final_answer", "repetitive"}
+                        and pos.get("reasoning_step_count", 0) > 0
                     ):
-                        self.stats["pairs_rejected_unstructured_negative"] += 1
-                        continue
+                        neg_step_ratio = (
+                            float(neg.get("reasoning_step_count", 0))
+                            / max(float(pos.get("reasoning_step_count", 0)), 1.0)
+                        )
+                        if (
+                            neg_step_ratio < self.config.min_negative_step_ratio
+                            and neg_error_type in {"trivial_short", "missing_final_answer", "repetitive"}
+                        ):
+                            self.stats["pairs_rejected_unstructured_negative"] += 1
+                            continue
 
                     pair_quality = self._pair_quality_score(pos, neg, diversity)
+                    if pair_quality < self.config.min_pair_quality_score:
+                        self.stats["pairs_rejected_low_quality"] += 1
+                        continue
                     pair = {
                         "prompt": pos.get("problem", ""),
                         "chosen": pos_reasoning,
@@ -503,6 +524,34 @@ class DataPreprocessor:
             "avg_diversity_score": sum(diversity_scores) / len(diversity_scores),
             "avg_pair_quality_score": sum(pair_quality_scores) / len(pair_quality_scores),
             "error_type_counts": dict(error_type_counts),
+        }
+
+    def summarize_samples(self, samples: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Summarize filtered samples by correctness and failure mode."""
+        if not samples:
+            return {
+                "sample_count": 0,
+                "correct_count": 0,
+                "incorrect_count": 0,
+                "failure_mode_counts": {},
+            }
+
+        failure_mode_counts = defaultdict(int)
+        correct_count = 0
+        incorrect_count = 0
+
+        for sample in samples:
+            if sample.get("is_correct", False):
+                correct_count += 1
+                continue
+            incorrect_count += 1
+            failure_mode_counts[self._classify_failure_mode(sample)] += 1
+
+        return {
+            "sample_count": len(samples),
+            "correct_count": correct_count,
+            "incorrect_count": incorrect_count,
+            "failure_mode_counts": dict(failure_mode_counts),
         }
 
 

@@ -72,6 +72,7 @@ class TestPreprocessorQuality:
                 min_step_count=0,
                 max_pairs_per_problem=3,
                 max_pairs_per_error_type=2,
+                min_pair_quality_score=0.0,
             )
         )
 
@@ -115,6 +116,48 @@ class TestPreprocessorQuality:
         summary = preprocessor.summarize_pairs(pairs)
         assert summary["pair_count"] == 1
         assert summary["error_type_counts"]["answer_mismatch"] == 1
+
+        sample_summary = preprocessor.summarize_samples(samples)
+        assert sample_summary["sample_count"] == 3
+        assert sample_summary["correct_count"] == 1
+        assert sample_summary["incorrect_count"] == 2
+        assert sample_summary["failure_mode_counts"]["answer_mismatch"] == 1
+
+    def test_preprocessor_requires_reliable_chosen_samples(self):
+        preprocessor = DataPreprocessor(
+            PreprocessConfig(
+                min_reasoning_tokens=1,
+                min_response_length=1,
+                min_step_count=0,
+                min_chosen_confidence=0.9,
+                min_pair_quality_score=0.0,
+            )
+        )
+
+        samples = [
+            {
+                "problem_id": "gsm8k_test_1",
+                "problem": "What is 3+3?",
+                "reasoning": "Add the numbers carefully. 3 + 3 = 6. #### 6",
+                "final_answer": "6",
+                "expected_answer": "6",
+                "is_correct": True,
+                "verification_confidence": 0.6,
+            },
+            {
+                "problem_id": "gsm8k_test_1",
+                "problem": "What is 3+3?",
+                "reasoning": "I think it might be 7. #### 7",
+                "final_answer": "7",
+                "expected_answer": "6",
+                "is_correct": False,
+                "verification_confidence": 0.1,
+            },
+        ]
+
+        _, pairs = preprocessor.preprocess(samples, create_pairs=True)
+
+        assert pairs == []
 
 
 class TestReasoningPath:
