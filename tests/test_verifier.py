@@ -121,6 +121,31 @@ class TestReasoningPathExtraction:
         answer = self.verifier.extract_final_answer(text)
         assert answer == "55"
 
+    def test_final_answer_label(self):
+        """Test extraction from explicit final-answer labels."""
+        text = "We compute the total carefully.\nFinal Answer: 57"
+        answer = self.verifier.extract_final_answer(text)
+        assert answer == "57"
+
+    def test_strips_chat_artifacts(self):
+        """Chat-template artifacts should not become the extracted answer."""
+        text = "<|assistant|>\n<|system|>\n|"
+        answer = self.verifier.extract_final_answer(text)
+        assert answer is None
+
+    def test_numeric_fallback_from_noisy_sentence(self):
+        """Verifier should recover numeric answers from noisy direct strings."""
+        result = self.verifier.verify(
+            "Answer: Gretchen has 70 gold coins. ####",
+            "70",
+        )
+        assert result.status == VerificationStatus.CORRECT
+
+    def test_numeric_fallback_with_latex_units(self):
+        """Verifier should ignore trailing LaTeX/unit fragments when possible."""
+        result = self.verifier.verify("100 \\text{ minutes", "100")
+        assert result.status == VerificationStatus.CORRECT
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

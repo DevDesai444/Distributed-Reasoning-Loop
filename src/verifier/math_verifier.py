@@ -113,24 +113,27 @@ class MathVerifier:
         - "= X" at the end
         - Boxed answers: \\boxed{X}
         """
+        cleaned_text = self._strip_generation_artifacts(text)
         patterns = [
             r'\\boxed\{([^}]+)\}',
             r'####\s*(.+?)(?:\n|$)',
+            r'[Ff]inal\s+[Aa]nswer[:\s-]*([^\n]+)',
             r'[Tt]he (?:final )?answer is[:\s]*([^\n.]+)',
+            r'[Aa]nswer[:\s-]*([^\n.]+)',
             r'[Tt]herefore[,:]?\s*(?:the answer is\s*)?([^\n.]+)',
-            r'[Ss]o[,:]?\s*(?:the answer is\s*)?([^\n.]+?)(?:\.|$)',
             r'=\s*([^\n=]+?)(?:\n|$)',
         ]
         
         for pattern in patterns:
-            matches = re.findall(pattern, text)
+            matches = re.findall(pattern, cleaned_text)
             if matches:
-                answer = matches[-1].strip()
-                # Clean up common artifacts
-                answer = re.sub(r'^\$|\$$', '', answer)
-                answer = re.sub(r'^\\text\{|\}$', '', answer)
-                return answer
-        
+                candidate = self._clean_candidate_answer(matches[-1])
+                if candidate is not None:
+                    return candidate
+
+        numeric_candidate = self._extract_last_numeric_candidate(cleaned_text)
+        if numeric_candidate is not None:
+            return numeric_candidate
         return None
 
     def _coerce_to_answer(self, text: str) -> str:
