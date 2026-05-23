@@ -114,6 +114,7 @@ Explain your approach, then provide the complete solution in a Python code block
         self.config = config
         self.model = None
         self.tokenizer = None
+        self._formatter_tokenizer = None
         self._initialized = False
         
     def _init_vllm(self):
@@ -207,13 +208,13 @@ Explain your approach, then provide the complete solution in a Python code block
         else:
             self._init_transformers()
     
-    def _format_prompt(
+    def _build_messages(
         self,
         problem: str,
         problem_type: str = "math",
         few_shot_examples: Optional[List[Dict[str, str]]] = None,
-    ) -> str:
-        """Format the prompt with system instruction and optional few-shot examples."""
+    ) -> List[Dict[str, str]]:
+        """Build chat-style messages for inference backends."""
         if problem_type == "math":
             system = self.MATH_SYSTEM_PROMPT
         else:
@@ -225,16 +226,65 @@ Explain your approach, then provide the complete solution in a Python code block
             for example in few_shot_examples:
                 messages.append({"role": "user", "content": example["problem"]})
                 messages.append({"role": "assistant", "content": example["solution"]})
-        
+
         messages.append({"role": "user", "content": problem})
-        
-        # Format as chat template
-        if self.config.backend == InferenceBackend.TRANSFORMERS and self.tokenizer:
-            return self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
+        return messages
+
+    def _get_formatter_tokenizer(self):
+        """
+        Lazily load a tokenizer for chat-template formatting.
+
+        Even when generation is handled by vLLM or an OpenAI-compatible SGLang server,
+        using the model's canonical tokenizer template keeps prompts aligned with
+        training and avoids leaking raw chat control tokens into outputs.
+        """
+        if self.tokenizer is not None:
+            return self.tokenizer
+        if self._formatter_tokenizer is not None:
+            return self._formatter_tokenizer
+
+        try:
+            from transformers import AutoTokenizer
+
+            self._formatter_tokenizer = AutoTokenizer.from_pretrained(
+                self.config.model_name,
+                trust_remote_code=True,
             )
-        
-        # Default formatting for vLLM/SGLang
+            return self._formatter_tokenizer
+        except Exception as exc:
+            logger.warning(
+                "Falling back to manual prompt formatting because tokenizer loading failed for %s: %s",
+                self.config.model_name,
+                exc,
+            )
+            self._formatter_tokenizer = False
+            return None
+
+    def _format_prompt(
+        self,
+        problem: str,
+        problem_type: str = "math",
+        few_shot_examples: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
+        """Format the prompt with system instruction and optional few-shot examples."""
+        messages = self._build_messages(problem, problem_type, few_shot_examples)
+
+        formatter_tokenizer = self._get_formatter_tokenizer()
+        if formatter_tokenizer is not None:
+            try:
+                return formatter_tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Chat template formatting failed for %s, using manual fallback: %s",
+                    self.config.model_name,
+                    exc,
+                )
+
+        # Manual fallback for models without a usable chat template.
         formatted = ""
         for msg in messages:
             role = msg["role"]
