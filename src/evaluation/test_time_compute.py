@@ -9,6 +9,7 @@ from typing import List, Optional, Dict, Any, Tuple, Callable
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 import heapq
+from collections import Counter, defaultdict
 
 try:
     import torch
@@ -44,7 +45,8 @@ class TestTimeComputeConfig:
     reranker_type: str = "score"  # score, orm, prm
     
     # Aggregation
-    aggregation_method: str = "best"  # best, majority_vote, weighted_vote
+    aggregation_method: str = "weighted_vote"  # best, majority_vote, weighted_vote
+    oracle_verify: bool = False
     
     # Search
     beam_width: int = 4
@@ -136,12 +138,82 @@ class TestTimeCompute:
         
         generated = []
         for path in paths:
+            final_answer = path.final_answer
+            if not final_answer and self.verifier is not None and hasattr(self.verifier, "extract_final_answer"):
+                final_answer = self.verifier.extract_final_answer(path.reasoning)
             generated.append(GeneratedPath(
                 reasoning=path.reasoning,
-                final_answer=path.final_answer,
+                final_answer=final_answer,
             ))
         
         return generated
+
+    def _answer_key(self, path: GeneratedPath) -> Optional[str]:
+        """Normalize a candidate's final answer for voting/reranking."""
+        final_answer = path.final_answer
+        if not final_answer and self.verifier is not None and hasattr(self.verifier, "extract_final_answer"):
+            final_answer = self.verifier.extract_final_answer(path.reasoning)
+            path.final_answer = final_answer
+
+        if not final_answer:
+            return None
+
+        if self.verifier is not None and hasattr(self.verifier, "normalize_answer"):
+            normalized = self.verifier.normalize_answer(final_answer)
+            return normalized or None
+
+        normalized = str(final_answer).strip()
+        return normalized or None
+
+    @staticmethod
+    def _repetition_penalty(reasoning: str) -> float:
+        words = reasoning.lower().split()
+        if len(words) < 20:
+            return 0.0
+        unique_ratio = len(set(words)) / len(words)
+        return max(0.0, 0.55 - unique_ratio)
+
+    def _heuristic_score(self, path: GeneratedPath) -> float:
+        """
+        Lightweight score used when no learned reranker or oracle label is available.
+        """
+        score = 0.0
+        answer_key = self._answer_key(path)
+        if answer_key:
+            score += 0.5
+
+        token_count = len(path.reasoning.split())
+        score += min(token_count / 400.0, 0.35)
+        score -= self._repetition_penalty(path.reasoning)
+        return score
+
+    def _apply_consensus_scores(self, paths: List[GeneratedPath]) -> List[GeneratedPath]:
+        """Boost candidates that agree with a shared normalized final answer."""
+        answer_counts = Counter()
+        answer_to_best = {}
+
+        for path in paths:
+            answer_key = self._answer_key(path)
+            if not answer_key:
+                continue
+            answer_counts[answer_key] += 1
+            if answer_key not in answer_to_best or path.score > answer_to_best[answer_key].score:
+                answer_to_best[answer_key] = path
+
+        total_votes = sum(answer_counts.values())
+        for path in paths:
+            answer_key = self._answer_key(path)
+            if not answer_key or total_votes == 0:
+                path.metadata["consensus_votes"] = 0
+                path.metadata["consensus_fraction"] = 0.0
+                continue
+            votes = answer_counts[answer_key]
+            fraction = votes / total_votes
+            path.metadata["consensus_votes"] = votes
+            path.metadata["consensus_fraction"] = fraction
+            path.score += votes + fraction
+
+        return paths
     
     def score_paths(
         self,
@@ -151,7 +223,7 @@ class TestTimeCompute:
     ) -> List[GeneratedPath]:
         """Score paths using reward model and/or verifier."""
         for path in paths:
-            score = 0.0
+            score = self._heuristic_score(path)
             
             # Reward model scoring
             if self.reward_model is not None:
@@ -159,8 +231,12 @@ class TestTimeCompute:
                 score += rm_score
                 path.metadata["reward_model_score"] = rm_score
             
-            # Verifier scoring
-            if self.verifier is not None and expected_answer is not None:
+            # Verifier scoring: only legal for explicit oracle analysis.
+            if (
+                self.verifier is not None
+                and expected_answer is not None
+                and self.config.oracle_verify
+            ):
                 if self.verifier_type == "math":
                     try:
                         from verifier import VerificationStatus
@@ -185,8 +261,7 @@ class TestTimeCompute:
                     path.final_answer = code
             
             path.score = score
-        
-        return paths
+        return self._apply_consensus_scores(paths)
 
     def rerank_with_reward_model(
         self,
@@ -199,7 +274,7 @@ class TestTimeCompute:
 
         for path in paths:
             orm_score = self.reward_model.compute_reward(problem, path.reasoning)
-            path.score = orm_score
+            path.score += orm_score
             path.metadata["outcome_reward_score"] = orm_score
 
         return sorted(paths, key=lambda candidate: candidate.score, reverse=True)
@@ -216,7 +291,7 @@ class TestTimeCompute:
         ranked = self.process_reward_model.rerank_candidates(problem, paths)
         reranked_paths: List[GeneratedPath] = []
         for candidate, prm_score in ranked:
-            candidate.score = prm_score
+            candidate.score += prm_score
             candidate.metadata["process_reward_score"] = prm_score
             reranked_paths.append(candidate)
         return reranked_paths
@@ -234,29 +309,28 @@ class TestTimeCompute:
         
         elif method == "majority_vote":
             # Vote by final answer
-            from collections import Counter
-            answers = [p.final_answer for p in paths if p.final_answer]
+            answers = [self._answer_key(path) for path in paths]
+            answers = [answer for answer in answers if answer]
             if not answers:
                 return max(paths, key=lambda p: p.score)
             
             most_common = Counter(answers).most_common(1)[0][0]
             for path in paths:
-                if path.final_answer == most_common:
+                if self._answer_key(path) == most_common:
                     return path
-            return paths[0]
+            return max(paths, key=lambda p: p.score)
         
         elif method == "weighted_vote":
             # Weighted vote by score
-            from collections import defaultdict
             answer_scores = defaultdict(float)
             answer_paths = {}
             
             for path in paths:
-                if path.final_answer:
-                    answer_scores[path.final_answer] += path.score
-                    if path.final_answer not in answer_paths or \
-                       path.score > answer_paths[path.final_answer].score:
-                        answer_paths[path.final_answer] = path
+                answer_key = self._answer_key(path)
+                if answer_key:
+                    answer_scores[answer_key] += path.score
+                    if answer_key not in answer_paths or path.score > answer_paths[answer_key].score:
+                        answer_paths[answer_key] = path
             
             if not answer_scores:
                 return max(paths, key=lambda p: p.score)
