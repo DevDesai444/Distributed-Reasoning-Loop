@@ -81,15 +81,18 @@ class RunArtifacts:
         nested: bool = True,
     ):
         root = Path(root_output_dir)
+        self.root_output_dir = root.resolve()
         normalized_name = run_name.strip().replace(" ", "_") if run_name else None
         run_id = normalized_name or f"{_utc_timestamp()}-{dataset}-{training_method}"
         if nested:
             runs_root = root / "runs"
             runs_root.mkdir(parents=True, exist_ok=True)
             self.run_dir = runs_root / run_id
+            self.runs_root = runs_root
         else:
             root.mkdir(parents=True, exist_ok=True)
             self.run_dir = root
+            self.runs_root = root
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
         self.manifest = RunManifest(
@@ -163,3 +166,64 @@ class RunArtifacts:
         if summary is not None:
             with open(self.summary_path, "w") as f:
                 json.dump(summary, f, indent=2)
+
+    def _find_previous_summary_path(self) -> Optional[Path]:
+        candidates: List[Path] = []
+        for entry in self.runs_root.iterdir():
+            if not entry.is_dir() or entry.resolve() == self.run_dir.resolve():
+                continue
+            summary_path = entry / "run_summary.json"
+            if summary_path.exists():
+                candidates.append(summary_path)
+        if not candidates:
+            return None
+        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+        return candidates[0]
+
+    def load_previous_summary(self) -> Optional[Dict[str, Any]]:
+        summary_path = self._find_previous_summary_path()
+        if summary_path is None:
+            return None
+        with open(summary_path) as handle:
+            return json.load(handle)
+
+    def _flatten_numeric_summary(
+        self,
+        payload: Any,
+        prefix: str = "",
+        output: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, float]:
+        if output is None:
+            output = {}
+
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                child_prefix = f"{prefix}.{key}" if prefix else str(key)
+                self._flatten_numeric_summary(value, child_prefix, output)
+            return output
+
+        if isinstance(payload, (int, float)) and not isinstance(payload, bool):
+            output[prefix] = float(payload)
+        return output
+
+    def compare_summary_to_previous(self, summary: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        previous_summary = self.load_previous_summary()
+        if previous_summary is None:
+            return None
+
+        current_flat = self._flatten_numeric_summary(summary)
+        previous_flat = self._flatten_numeric_summary(previous_summary)
+        deltas = {}
+        for key, current_value in current_flat.items():
+            if key not in previous_flat:
+                continue
+            deltas[key] = {
+                "previous": previous_flat[key],
+                "current": current_value,
+                "delta": current_value - previous_flat[key],
+            }
+
+        return {
+            "previous_run_summary": str(self._find_previous_summary_path()),
+            "metrics": deltas,
+        }

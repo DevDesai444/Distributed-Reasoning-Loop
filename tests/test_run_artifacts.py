@@ -61,3 +61,31 @@ def test_run_artifacts_can_attach_to_flat_output_directory(tmp_path):
     assert manifest["run_dir"] == str(outputs_dir.resolve())
     assert latest["run_dir"] == str(outputs_dir.resolve())
     assert summary["valid_run"] is True
+
+
+def test_run_artifacts_can_compare_against_previous_run(tmp_path):
+    outputs_dir = tmp_path / "outputs"
+    first = RunArtifacts(
+        root_output_dir=str(outputs_dir),
+        dataset="gsm8k",
+        training_method="best",
+        run_name="run-a",
+    )
+    first.finalize(
+        "completed",
+        summary={"evaluation": {"gsm8k": {"accuracy": 0.67}}},
+    )
+
+    second = RunArtifacts(
+        root_output_dir=str(outputs_dir),
+        dataset="gsm8k",
+        training_method="best",
+        run_name="run-b",
+    )
+    comparison = second.compare_summary_to_previous(
+        {"evaluation": {"gsm8k": {"accuracy": 0.71}}}
+    )
+
+    assert comparison is not None
+    assert comparison["metrics"]["evaluation.gsm8k.accuracy"]["previous"] == 0.67
+    assert comparison["metrics"]["evaluation.gsm8k.accuracy"]["current"] == 0.71
