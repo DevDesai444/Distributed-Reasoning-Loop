@@ -55,11 +55,13 @@ class BaseEvaluator:
         num_samples: int = 1,
         use_test_time_compute: bool = False,
         ttc_samples: int = 16,
+        ttc_oracle_verify: bool = False,
     ):
         self.model_name = model_name
         self.num_samples = num_samples
         self.use_test_time_compute = use_test_time_compute
         self.ttc_samples = ttc_samples
+        self.ttc_oracle_verify = ttc_oracle_verify
         
         self.generator = None
         self.ttc = None
@@ -81,7 +83,10 @@ class BaseEvaluator:
         
         if self.use_test_time_compute:
             from .test_time_compute import TestTimeCompute, TestTimeComputeConfig
-            ttc_config = TestTimeComputeConfig(num_samples=self.ttc_samples)
+            ttc_config = TestTimeComputeConfig(
+                num_samples=self.ttc_samples,
+                oracle_verify=self.ttc_oracle_verify,
+            )
             self.ttc = TestTimeCompute(self.model_name, ttc_config)
     
     def evaluate(self, problems: List[Dict[str, Any]]) -> BenchmarkResult:
@@ -139,7 +144,10 @@ class GSM8KEvaluator(BaseEvaluator):
             
             try:
                 if self.use_test_time_compute:
-                    best, _ = self.ttc.solve(problem.problem, problem.answer)
+                    best, _ = self.ttc.solve(
+                        problem.problem,
+                        problem.answer if self.ttc_oracle_verify else None,
+                    )
                     predicted = best.final_answer
                     reasoning = best.reasoning
                 else:
@@ -374,7 +382,10 @@ class MATHEvaluator(BaseEvaluator):
             
             try:
                 if self.use_test_time_compute:
-                    best, _ = self.ttc.solve(problem.problem, problem.answer)
+                    best, _ = self.ttc.solve(
+                        problem.problem,
+                        problem.answer if self.ttc_oracle_verify else None,
+                    )
                     predicted = best.final_answer
                     reasoning = best.reasoning
                 else:
@@ -445,6 +456,7 @@ def run_all_benchmarks(
     gsm8k_subset_size: Optional[int] = None,
     humaneval_subset_size: Optional[int] = None,
     ttc_samples: int = 16,
+    ttc_oracle_verify: bool = False,
 ) -> Dict[str, BenchmarkResult]:
     """
     Run all benchmarks and save results.
@@ -464,7 +476,12 @@ def run_all_benchmarks(
     
     # GSM8K
     logger.info("Running GSM8K evaluation...")
-    gsm8k = GSM8KEvaluator(model_name, use_test_time_compute=use_ttc, ttc_samples=ttc_samples)
+    gsm8k = GSM8KEvaluator(
+        model_name,
+        use_test_time_compute=use_ttc,
+        ttc_samples=ttc_samples,
+        ttc_oracle_verify=ttc_oracle_verify,
+    )
     gsm8k_result = gsm8k.evaluate(subset_size=gsm8k_subset_size)
     gsm8k_result.save(f"{output_dir}/gsm8k_results.json")
     results["gsm8k"] = gsm8k_result
