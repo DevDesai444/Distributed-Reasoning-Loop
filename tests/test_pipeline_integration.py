@@ -747,6 +747,98 @@ def test_run_grpo_training_prefers_distributed_launcher(monkeypatch, tmp_path):
     assert "--save-best-checkpoint" in captured["training_args"]
 
 
+def test_run_sft_training_forwards_optional_sft_config(monkeypatch, tmp_path):
+    pipeline_module = _load_run_pipeline_module()
+    captured = {}
+
+    class FakeSFTTrainerConfig:
+        def __init__(
+            self,
+            model_name,
+            learning_rate,
+            batch_size,
+            gradient_accumulation_steps,
+            num_epochs,
+            max_length,
+            problem_type,
+            eval_steps,
+            save_steps,
+            fp16,
+            bf16,
+            gradient_checkpointing,
+            packing,
+            output_dir,
+        ):
+            captured["config"] = {
+                "model_name": model_name,
+                "learning_rate": learning_rate,
+                "batch_size": batch_size,
+                "gradient_accumulation_steps": gradient_accumulation_steps,
+                "num_epochs": num_epochs,
+                "max_length": max_length,
+                "problem_type": problem_type,
+                "eval_steps": eval_steps,
+                "save_steps": save_steps,
+                "fp16": fp16,
+                "bf16": bf16,
+                "gradient_checkpointing": gradient_checkpointing,
+                "packing": packing,
+                "output_dir": output_dir,
+            }
+            self.output_dir = output_dir
+
+    class FakeSFTFromSyntheticData:
+        def __init__(self, cfg, data_path):
+            captured["data_path"] = data_path
+            self.cfg = cfg
+
+        def train(self):
+            Path(self.cfg.output_dir).mkdir(parents=True, exist_ok=True)
+
+    fake_training = types.SimpleNamespace(
+        SFTTrainerConfig=FakeSFTTrainerConfig,
+        SFTFromSyntheticData=FakeSFTFromSyntheticData,
+    )
+    monkeypatch.setitem(sys.modules, "training", fake_training)
+
+    data_path = tmp_path / "correct.jsonl"
+    data_path.write_text('{"problem":"p","reasoning":"r"}\n')
+
+    config = OmegaConf.create(
+        {
+            "data_generator": {"student_model": "student-model"},
+            "training": {
+                "batch_size": 1,
+                "learning_rate": 1e-6,
+                "dpo": {"max_length": 2048},
+                "sft": {
+                    "learning_rate": 2e-6,
+                    "gradient_accumulation_steps": 8,
+                    "max_length": 1024,
+                    "eval_steps": 250,
+                    "save_steps": 999,
+                    "fp16": True,
+                    "bf16": False,
+                    "gradient_checkpointing": True,
+                    "packing": False,
+                },
+            },
+            "general": {"output_dir": str(tmp_path / "outputs")},
+        }
+    )
+
+    output_dir = pipeline_module.run_sft_training(config, str(data_path), "gsm8k")
+
+    assert output_dir.endswith("sft_model")
+    assert captured["data_path"] == str(data_path)
+    assert captured["config"]["learning_rate"] == 2e-6
+    assert captured["config"]["gradient_accumulation_steps"] == 8
+    assert captured["config"]["max_length"] == 1024
+    assert captured["config"]["eval_steps"] == 250
+    assert captured["config"]["save_steps"] == 999
+    assert captured["config"]["problem_type"] == "math"
+
+
 def test_run_evaluation_rejects_invalid_benchmark_runs(monkeypatch, tmp_path):
     pipeline_module = _load_run_pipeline_module()
 

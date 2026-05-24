@@ -248,13 +248,22 @@ def run_sft_training(config, data_path, dataset_name):
     logger.info("Phase 2a: Supervised Fine-Tuning")
     logger.info("=" * 50)
     
+    sft_overrides = config.training.get("sft", {})
     sft_config = _construct_with_supported_kwargs(
         SFTTrainerConfig,
         model_name=config.data_generator.student_model,
-        learning_rate=config.training.learning_rate * 2,  # Higher LR for SFT
+        learning_rate=sft_overrides.get("learning_rate", config.training.learning_rate * 2),  # Higher LR for SFT
         batch_size=config.training.batch_size,
+        gradient_accumulation_steps=sft_overrides.get("gradient_accumulation_steps", 4),
         num_epochs=1,  # Quick SFT pass
+        max_length=sft_overrides.get("max_length", config.training.dpo.get("max_length", 2048)),
         problem_type=_dataset_problem_type(dataset_name),
+        eval_steps=sft_overrides.get("eval_steps", 100),
+        save_steps=sft_overrides.get("save_steps", 500),
+        fp16=bool(sft_overrides.get("fp16", True)),
+        bf16=bool(sft_overrides.get("bf16", False)),
+        gradient_checkpointing=bool(sft_overrides.get("gradient_checkpointing", True)),
+        packing=bool(sft_overrides.get("packing", False)),
         output_dir=f"{config.general.output_dir}/sft_model",
     )
     
