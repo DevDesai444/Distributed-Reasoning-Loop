@@ -93,3 +93,84 @@ def test_dpo_train_preserves_non_trl_import_errors(monkeypatch):
 
     with pytest.raises(ImportError, match="adapter mismatch"):
         trainer.train([{"prompt": "p", "chosen": "c", "rejected": "r"}])
+
+
+def test_dpo_train_filters_unsupported_trl_kwargs(monkeypatch):
+    trainer = ReasoningDPOTrainer(
+        DPOTrainerConfig(
+            output_dir="./tmp-dpo-output",
+            max_length=256,
+            max_prompt_length=64,
+        )
+    )
+
+    captured = {}
+
+    class FakeDPOConfig:
+        def __init__(
+            self,
+            output_dir,
+            num_train_epochs,
+            per_device_train_batch_size,
+            per_device_eval_batch_size,
+            gradient_accumulation_steps,
+            learning_rate,
+            warmup_ratio,
+            weight_decay,
+            max_grad_norm,
+            logging_steps,
+            eval_steps,
+            save_steps,
+            evaluation_strategy,
+            fp16,
+            bf16,
+            beta,
+            loss_type,
+            max_length,
+            remove_unused_columns,
+        ):
+            captured["config_kwargs"] = {
+                "output_dir": output_dir,
+                "evaluation_strategy": evaluation_strategy,
+                "max_length": max_length,
+                "remove_unused_columns": remove_unused_columns,
+            }
+
+    class FakeDPOTrainer:
+        def __init__(self, model, ref_model, args, train_dataset, eval_dataset, tokenizer):
+            captured["trainer_kwargs"] = {
+                "model": model,
+                "ref_model": ref_model,
+                "args": args,
+                "train_dataset": train_dataset,
+                "eval_dataset": eval_dataset,
+                "tokenizer": tokenizer,
+            }
+
+        def train(self):
+            captured["train_called"] = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "trl",
+        types.SimpleNamespace(DPOTrainer=FakeDPOTrainer, DPOConfig=FakeDPOConfig),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "datasets",
+        types.SimpleNamespace(Dataset=types.SimpleNamespace(from_list=lambda items: items)),
+    )
+
+    trainer.model = object()
+    trainer.ref_model = None
+    trainer.tokenizer = object()
+    trainer.setup = lambda: None
+    trainer.save = lambda path=None: None
+
+    trainer.train([{"prompt": "p", "chosen": "c", "rejected": "r"}], eval_data=[{"prompt": "p", "chosen": "c", "rejected": "r"}])
+
+    assert captured["config_kwargs"]["evaluation_strategy"] == "steps"
+    assert captured["config_kwargs"]["max_length"] == 256
+    assert "trainer_kwargs" in captured
+    assert captured["trainer_kwargs"]["tokenizer"] is trainer.tokenizer
+    assert captured["train_called"] is True

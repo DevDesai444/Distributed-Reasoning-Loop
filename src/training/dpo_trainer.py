@@ -5,6 +5,7 @@ Implements preference learning from verified reasoning paths.
 
 import os
 import logging
+import inspect
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
@@ -21,6 +22,49 @@ from .runtime_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_supported_kwargs(
+    factory,
+    kwargs: Dict[str, Any],
+    *,
+    context: str,
+    aliases: Optional[Dict[str, Tuple[str, ...]]] = None,
+) -> Dict[str, Any]:
+    """Filter kwargs to the parameters supported by a callable's signature."""
+    aliases = aliases or {}
+    signature = inspect.signature(factory)
+
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+        return kwargs
+
+    supported = set(signature.parameters)
+    filtered: Dict[str, Any] = {}
+    skipped: list[str] = []
+
+    for key, value in kwargs.items():
+        if key in supported:
+            filtered[key] = value
+            continue
+
+        mapped_key = next(
+            (candidate for candidate in aliases.get(key, ()) if candidate in supported),
+            None,
+        )
+        if mapped_key is not None:
+            filtered[mapped_key] = value
+            continue
+
+        skipped.append(key)
+
+    if skipped:
+        logger.info(
+            "%s does not support arguments %s on this runtime; skipping them.",
+            context,
+            ", ".join(sorted(skipped)),
+        )
+
+    return filtered
 
 
 @dataclass
@@ -261,37 +305,53 @@ class ReasoningDPOTrainer:
         )
         
         # DPO training config
+        dpo_config_kwargs = {
+            "output_dir": self.config.output_dir,
+            "num_train_epochs": self.config.num_epochs,
+            "per_device_train_batch_size": self.config.batch_size,
+            "per_device_eval_batch_size": self.config.batch_size,
+            "gradient_accumulation_steps": self.config.gradient_accumulation_steps,
+            "learning_rate": self.config.learning_rate,
+            "warmup_ratio": self.config.warmup_ratio,
+            "weight_decay": self.config.weight_decay,
+            "max_grad_norm": self.config.max_grad_norm,
+            "logging_steps": self.config.logging_steps,
+            "eval_steps": self.config.eval_steps if eval_data else None,
+            "save_steps": self.config.save_steps,
+            "eval_strategy": "steps" if eval_data else "no",
+            "fp16": self.config.fp16 and torch.cuda.is_available(),
+            "bf16": self.config.bf16 and torch.cuda.is_available(),
+            "beta": self.config.beta,
+            "loss_type": self.config.loss_type,
+            "max_length": self.config.max_length,
+            "max_prompt_length": self.config.max_prompt_length,
+            "remove_unused_columns": False,
+        }
         training_args = DPOConfig(
-            output_dir=self.config.output_dir,
-            num_train_epochs=self.config.num_epochs,
-            per_device_train_batch_size=self.config.batch_size,
-            per_device_eval_batch_size=self.config.batch_size,
-            gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-            learning_rate=self.config.learning_rate,
-            warmup_ratio=self.config.warmup_ratio,
-            weight_decay=self.config.weight_decay,
-            max_grad_norm=self.config.max_grad_norm,
-            logging_steps=self.config.logging_steps,
-            eval_steps=self.config.eval_steps if eval_data else None,
-            save_steps=self.config.save_steps,
-            eval_strategy="steps" if eval_data else "no",
-            fp16=self.config.fp16 and torch.cuda.is_available(),
-            bf16=self.config.bf16 and torch.cuda.is_available(),
-            beta=self.config.beta,
-            loss_type=self.config.loss_type,
-            max_length=self.config.max_length,
-            max_prompt_length=self.config.max_prompt_length,
-            remove_unused_columns=False,
+            **_build_supported_kwargs(
+                DPOConfig,
+                dpo_config_kwargs,
+                context="TRL DPOConfig",
+                aliases={"eval_strategy": ("evaluation_strategy",)},
+            )
         )
         
         # Create DPO trainer
+        trainer_kwargs = {
+            "model": self.model,
+            "ref_model": self.ref_model,
+            "args": training_args,
+            "train_dataset": train_dataset,
+            "eval_dataset": eval_dataset,
+            "processing_class": self.tokenizer,
+        }
         self.trainer = DPOTrainer(
-            model=self.model,
-            ref_model=self.ref_model,
-            args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            processing_class=self.tokenizer,
+            **_build_supported_kwargs(
+                DPOTrainer,
+                trainer_kwargs,
+                context="TRL DPOTrainer",
+                aliases={"processing_class": ("tokenizer",)},
+            )
         )
         
         # Train
