@@ -35,12 +35,14 @@ from prompting import format_conversation, format_prompt
 try:
     from .runtime_utils import (
         build_causal_lm_load_kwargs,
+        configure_training_memory,
         get_runtime_device,
         load_causal_lm_for_training,
     )
 except ImportError:
     from training.runtime_utils import (
         build_causal_lm_load_kwargs,
+        configure_training_memory,
         get_runtime_device,
         load_causal_lm_for_training,
     )
@@ -601,8 +603,10 @@ class ReasoningGRPOTrainer:
             for param in self.model.parameters():
                 param.requires_grad = True
 
-        if self.config.gradient_checkpointing:
-            self.model.gradient_checkpointing_enable()
+        configure_training_memory(
+            self.model,
+            gradient_checkpointing=self.config.gradient_checkpointing,
+        )
 
         if self.config.use_lora:
             self.ref_model = None

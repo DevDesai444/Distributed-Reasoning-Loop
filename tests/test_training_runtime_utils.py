@@ -7,11 +7,12 @@ import types
 from pathlib import Path
 
 import pytest
+import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from training.dpo_trainer import DPOTrainerConfig, ReasoningDPOTrainer
-from training.runtime_utils import load_causal_lm_for_training
+from training.runtime_utils import build_causal_lm_load_kwargs, configure_training_memory, load_causal_lm_for_training
 
 
 class _FakeModel:
@@ -174,3 +175,41 @@ def test_dpo_train_filters_unsupported_trl_kwargs(monkeypatch):
     assert "trainer_kwargs" in captured
     assert captured["trainer_kwargs"]["tokenizer"] is trainer.tokenizer
     assert captured["train_called"] is True
+
+
+def test_build_causal_lm_load_kwargs_prefers_balanced_low_0_on_multi_gpu(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+
+    class FakeProps:
+        total_memory = 16 * 1024 * 1024 * 1024
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda index: FakeProps())
+
+    kwargs, use_8bit = build_causal_lm_load_kwargs(prefer_bf16=False, allow_8bit=False)
+
+    assert use_8bit is False
+    assert kwargs["device_map"] == "balanced_low_0"
+    assert kwargs["max_memory"] == {0: "14848MiB", 1: "14848MiB"}
+
+
+def test_configure_training_memory_disables_use_cache_for_checkpointed_models():
+    class FakeConfig:
+        def __init__(self):
+            self.use_cache = True
+
+    class FakeModel:
+        def __init__(self):
+            self.config = FakeConfig()
+            self.generation_config = FakeConfig()
+            self.gradient_checkpointing_calls = 0
+
+        def gradient_checkpointing_enable(self):
+            self.gradient_checkpointing_calls += 1
+
+    model = FakeModel()
+    configure_training_memory(model, gradient_checkpointing=True)
+
+    assert model.gradient_checkpointing_calls == 1
+    assert model.config.use_cache is False
+    assert model.generation_config.use_cache is False

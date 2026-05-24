@@ -13,6 +13,7 @@ from prompting import format_conversation
 
 from .runtime_utils import (
     build_causal_lm_load_kwargs,
+    configure_training_memory,
     get_runtime_dtype,
 )
 
@@ -99,9 +100,11 @@ class ReasoningSFTTrainer:
         if self.config.use_lora:
             self._apply_lora()
         
-        if self.config.gradient_checkpointing:
-            self.model.gradient_checkpointing_enable()
-        
+        configure_training_memory(
+            self.model,
+            gradient_checkpointing=self.config.gradient_checkpointing,
+        )
+
         logger.info(f"Model loaded: {self.config.model_name}")
     
     def _apply_lora(self):

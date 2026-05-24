@@ -55,6 +55,23 @@ def get_runtime_dtype(prefer_bf16: bool = False) -> torch.dtype:
     return torch.bfloat16 if prefer_bf16 else torch.float16
 
 
+def _multi_gpu_max_memory() -> Optional[dict[int, str]]:
+    """Reserve a little headroom on each visible GPU for activations and CUDA runtime."""
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+        return None
+
+    max_memory: dict[int, str] = {}
+    reserve_bytes = 1536 * 1024 * 1024  # Leave ~1.5 GiB free per GPU.
+    minimum_bytes = 2048 * 1024 * 1024
+
+    for index in range(torch.cuda.device_count()):
+        total_bytes = torch.cuda.get_device_properties(index).total_memory
+        usable_bytes = max(total_bytes - reserve_bytes, minimum_bytes)
+        max_memory[index] = f"{usable_bytes // (1024 * 1024)}MiB"
+
+    return max_memory
+
+
 def build_causal_lm_load_kwargs(
     *,
     prefer_bf16: bool = False,
@@ -70,7 +87,13 @@ def build_causal_lm_load_kwargs(
 
     use_8bit = False
     if torch.cuda.is_available():
-        kwargs["device_map"] = "auto"
+        if torch.cuda.device_count() > 1:
+            kwargs["device_map"] = "balanced_low_0"
+            max_memory = _multi_gpu_max_memory()
+            if max_memory is not None:
+                kwargs["max_memory"] = max_memory
+        else:
+            kwargs["device_map"] = "auto"
         if allow_8bit and bitsandbytes_available():
             try:
                 from transformers import BitsAndBytesConfig
@@ -88,6 +111,26 @@ def build_causal_lm_load_kwargs(
             )
 
     return kwargs, use_8bit
+
+
+def configure_training_memory(model: Any, *, gradient_checkpointing: bool) -> None:
+    """Apply training-time memory settings that are easy to forget across trainers."""
+    if gradient_checkpointing:
+        if hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable()
+
+        for cfg_owner in (
+            model,
+            getattr(model, "model", None),
+            getattr(model, "base_model", None),
+        ):
+            config = getattr(cfg_owner, "config", None)
+            if config is not None and hasattr(config, "use_cache"):
+                config.use_cache = False
+
+        generation_config = getattr(model, "generation_config", None)
+        if generation_config is not None and hasattr(generation_config, "use_cache"):
+            generation_config.use_cache = False
 
 
 def is_adapter_checkpoint(model_name_or_path: str) -> bool:

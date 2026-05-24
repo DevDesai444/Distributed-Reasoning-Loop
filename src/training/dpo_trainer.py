@@ -17,6 +17,7 @@ from torch.utils.data import Dataset, DataLoader
 from prompting import format_prompt
 
 from .runtime_utils import (
+    configure_training_memory,
     get_runtime_dtype,
     load_causal_lm_for_training,
 )
@@ -236,9 +237,11 @@ class ReasoningDPOTrainer:
             )
         
         # Enable gradient checkpointing
-        if self.config.gradient_checkpointing:
-            self.model.gradient_checkpointing_enable()
-        
+        configure_training_memory(
+            self.model,
+            gradient_checkpointing=self.config.gradient_checkpointing,
+        )
+
         logger.info(f"Model loaded: {self.config.model_name}")
     
     def _apply_lora(self):
