@@ -1372,23 +1372,38 @@ def train_grpo_from_synthetic_data(
     data_path: str,
     output_dir: str = "./grpo_output",
     model_name: str = "Qwen/Qwen2.5-7B-Instruct",
+    learning_rate: float = 5e-5,
     num_epochs: int = 1,
     batch_size: int = 2,
     group_size: int = 8,
+    max_length: int = 1024,
+    max_prompt_length: int = 256,
+    prompt_problem_type: str = "math",
+    verifier_timeout: int = 10,
+    code_docker_image: Optional[str] = None,
+    code_memory_limit: str = "512m",
+    kl_threshold: float = 0.1,
+    eval_interval_steps: int = 50,
     online_max_new_tokens: int = 256,
     online_temperature: float = 0.8,
     online_top_p: float = 0.95,
     online_resample_attempts: int = 2,
+    online_min_reward_std: float = 1e-6,
     enable_ray_verification: bool = True,
     ray_verifier_workers: int = 4,
     verifier_type: str = "math",
     heldout_dataset: str = "gsm8k",
     heldout_split: str = "test",
     heldout_eval_size: int = 20,
+    eval_max_new_tokens: int = 256,
     save_best_checkpoint: bool = True,
     best_checkpoint_metric: str = "pass_at_1",
     min_eval_improvement: float = 1e-4,
     early_stop_patience: int = 0,
+    wandb_project: str = "distributed-reasoning-loop",
+    wandb_mode: str = "offline",
+    bf16: bool = True,
+    gradient_checkpointing: bool = True,
     distributed_timeout_minutes: int = 0,
 ):
     """Convenience entry point for GRPO training from a JSONL file."""
@@ -1400,23 +1415,38 @@ def train_grpo_from_synthetic_data(
     config = GRPOConfig(
         model_name=model_name,
         output_dir=output_dir,
+        learning_rate=learning_rate,
         num_epochs=num_epochs,
         batch_size=batch_size,
         group_size=group_size,
+        max_length=max_length,
+        max_prompt_length=max_prompt_length,
+        prompt_problem_type=prompt_problem_type,
+        verifier_timeout=verifier_timeout,
+        code_docker_image=code_docker_image or get_default_sandbox_image(),
+        code_memory_limit=code_memory_limit,
+        kl_threshold=kl_threshold,
+        eval_interval_steps=eval_interval_steps,
         online_max_new_tokens=online_max_new_tokens,
         online_temperature=online_temperature,
         online_top_p=online_top_p,
         online_resample_attempts=online_resample_attempts,
+        online_min_reward_std=online_min_reward_std,
         enable_ray_verification=enable_ray_verification,
         ray_verifier_workers=ray_verifier_workers,
         verifier_type=verifier_type,
         heldout_dataset=heldout_dataset,
         heldout_split=heldout_split,
         heldout_eval_size=heldout_eval_size,
+        eval_max_new_tokens=eval_max_new_tokens,
         save_best_checkpoint=save_best_checkpoint,
         best_checkpoint_metric=best_checkpoint_metric,
         min_eval_improvement=min_eval_improvement,
         early_stop_patience=early_stop_patience,
+        wandb_project=wandb_project,
+        wandb_mode=wandb_mode,
+        bf16=bf16,
+        gradient_checkpointing=gradient_checkpointing,
         distributed_timeout_minutes=distributed_timeout_minutes,
     )
 
@@ -1445,12 +1475,22 @@ if __name__ == "__main__":
         type=int,
         default=1,
     )
+    parser.add_argument("--learning-rate", type=float, default=5e-5)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--group-size", type=int, default=8)
+    parser.add_argument("--max-length", type=int, default=1024)
+    parser.add_argument("--max-prompt-length", type=int, default=256)
+    parser.add_argument("--prompt-problem-type", type=str, default="math")
+    parser.add_argument("--verifier-timeout", type=int, default=10)
+    parser.add_argument("--code-docker-image", type=str, default=get_default_sandbox_image())
+    parser.add_argument("--code-memory-limit", type=str, default="512m")
+    parser.add_argument("--kl-threshold", type=float, default=0.1)
+    parser.add_argument("--eval-interval-steps", type=int, default=50)
     parser.add_argument("--online-max-new-tokens", type=int, default=256)
     parser.add_argument("--online-temperature", type=float, default=0.8)
     parser.add_argument("--online-top-p", type=float, default=0.95)
     parser.add_argument("--online-resample-attempts", type=int, default=2)
+    parser.add_argument("--online-min-reward-std", type=float, default=1e-6)
     parser.add_argument("--enable-ray-verification", action="store_true")
     parser.add_argument("--disable-ray-verification", action="store_true")
     parser.add_argument("--ray-verifier-workers", type=int, default=4)
@@ -1458,11 +1498,18 @@ if __name__ == "__main__":
     parser.add_argument("--heldout-dataset", type=str, default="gsm8k")
     parser.add_argument("--heldout-split", type=str, default="test")
     parser.add_argument("--heldout-eval-size", type=int, default=20)
+    parser.add_argument("--eval-max-new-tokens", type=int, default=256)
     parser.add_argument("--save-best-checkpoint", action="store_true")
     parser.add_argument("--disable-save-best-checkpoint", action="store_true")
     parser.add_argument("--best-checkpoint-metric", type=str, default="pass_at_1")
     parser.add_argument("--min-eval-improvement", type=float, default=1e-4)
     parser.add_argument("--early-stop-patience", type=int, default=0)
+    parser.add_argument("--wandb-project", type=str, default="distributed-reasoning-loop")
+    parser.add_argument("--wandb-mode", type=str, default="offline")
+    parser.add_argument("--bf16", action="store_true")
+    parser.add_argument("--no-bf16", action="store_true")
+    parser.add_argument("--gradient-checkpointing", action="store_true")
+    parser.add_argument("--no-gradient-checkpointing", action="store_true")
     parser.add_argument(
         "--distributed-timeout-minutes",
         type=int,
@@ -1503,22 +1550,43 @@ if __name__ == "__main__":
         data_path=args.data_path,
         output_dir=args.output_dir,
         model_name=args.model_name,
+        learning_rate=args.learning_rate,
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
         group_size=args.group_size,
+        max_length=args.max_length,
+        max_prompt_length=args.max_prompt_length,
+        prompt_problem_type=args.prompt_problem_type,
+        verifier_timeout=args.verifier_timeout,
+        code_docker_image=args.code_docker_image,
+        code_memory_limit=args.code_memory_limit,
+        kl_threshold=args.kl_threshold,
+        eval_interval_steps=args.eval_interval_steps,
         online_max_new_tokens=args.online_max_new_tokens,
         online_temperature=args.online_temperature,
         online_top_p=args.online_top_p,
         online_resample_attempts=args.online_resample_attempts,
+        online_min_reward_std=args.online_min_reward_std,
         enable_ray_verification=(False if args.disable_ray_verification else True if args.enable_ray_verification else True),
         ray_verifier_workers=args.ray_verifier_workers,
         verifier_type=args.verifier_type,
         heldout_dataset=args.heldout_dataset,
         heldout_split=args.heldout_split,
         heldout_eval_size=args.heldout_eval_size,
+        eval_max_new_tokens=args.eval_max_new_tokens,
         save_best_checkpoint=(False if args.disable_save_best_checkpoint else True if args.save_best_checkpoint else True),
         best_checkpoint_metric=args.best_checkpoint_metric,
         min_eval_improvement=args.min_eval_improvement,
         early_stop_patience=args.early_stop_patience,
+        wandb_project=args.wandb_project,
+        wandb_mode=args.wandb_mode,
+        bf16=(False if args.no_bf16 else True if args.bf16 else True),
+        gradient_checkpointing=(
+            False
+            if args.no_gradient_checkpointing
+            else True
+            if args.gradient_checkpointing
+            else True
+        ),
         distributed_timeout_minutes=args.distributed_timeout_minutes,
     )

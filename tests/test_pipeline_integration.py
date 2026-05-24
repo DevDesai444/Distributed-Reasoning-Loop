@@ -667,6 +667,86 @@ def test_resolve_evaluation_model_path_carries_checkpoint_selection_metadata(tmp
     assert metadata["selection_step"] == 120
 
 
+def test_run_grpo_training_prefers_distributed_launcher(monkeypatch, tmp_path):
+    pipeline_module = _load_run_pipeline_module()
+    captured = {}
+
+    def fake_maybe_launch_grpo_distributed(training_args, requested_num_gpus="auto"):
+        captured["training_args"] = training_args
+        captured["requested_num_gpus"] = requested_num_gpus
+        return True
+
+    def fake_train_grpo_from_synthetic_data(**kwargs):
+        raise AssertionError("in-process GRPO fallback should not run when distributed launch succeeds")
+
+    fake_grpo_module = types.SimpleNamespace(
+        GRPOConfig=object,
+        ReasoningGRPOTrainer=object,
+        maybe_launch_grpo_distributed=fake_maybe_launch_grpo_distributed,
+        train_grpo_from_synthetic_data=fake_train_grpo_from_synthetic_data,
+    )
+    monkeypatch.setitem(sys.modules, "training.grpo_trainer", fake_grpo_module)
+
+    data_path = tmp_path / "pairs.jsonl"
+    data_path.write_text('{"prompt":"p","chosen":"c","rejected":"r"}\n')
+
+    config = OmegaConf.create(
+        {
+            "data_generator": {
+                "student_model": "student-model",
+            },
+            "verifier": {
+                "type": "math",
+                "math": {"timeout": 7},
+                "code": {"docker_image": "sandbox", "memory_limit": "256m"},
+            },
+            "training": {
+                "learning_rate": 1e-6,
+                "batch_size": 2,
+                "num_epochs": 1,
+                "dpo": {"max_length": 128, "max_prompt_length": 48},
+                "grpo": {
+                    "group_size": 4,
+                    "kl_threshold": 0.2,
+                    "eval_interval_steps": 12,
+                    "heldout_eval_size": 5,
+                    "heldout_dataset": "gsm8k",
+                    "heldout_split": "test",
+                    "eval_max_new_tokens": 64,
+                    "save_best_checkpoint": True,
+                    "best_checkpoint_metric": "pass_at_1",
+                    "min_eval_improvement": 0.0001,
+                    "early_stop_patience": 2,
+                    "online_max_new_tokens": 32,
+                    "online_temperature": 0.7,
+                    "online_top_p": 0.9,
+                    "online_resample_attempts": 1,
+                    "online_min_reward_std": 1e-6,
+                    "enable_ray_verification": False,
+                    "ray_verifier_workers": 1,
+                    "num_gpus": "auto",
+                    "distributed_timeout_minutes": 0,
+                },
+                "wandb": {"project": "proj", "mode": "offline"},
+            },
+            "general": {"output_dir": str(tmp_path / "outputs")},
+        }
+    )
+
+    output_dir = pipeline_module.run_grpo_training(
+        config,
+        str(data_path),
+        "gsm8k",
+        base_model="adapter-path",
+    )
+
+    assert output_dir.endswith("grpo_model")
+    assert captured["requested_num_gpus"] == "auto"
+    assert "--model-name" in captured["training_args"]
+    assert "--disable-ray-verification" in captured["training_args"]
+    assert "--save-best-checkpoint" in captured["training_args"]
+
+
 def test_run_evaluation_rejects_invalid_benchmark_runs(monkeypatch, tmp_path):
     pipeline_module = _load_run_pipeline_module()
 

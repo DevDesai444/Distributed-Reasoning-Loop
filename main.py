@@ -56,20 +56,34 @@ def cmd_train_grpo(args):
             "--data-path", parsed_args.data_path,
             "--output-dir", parsed_args.output_dir,
             "--model-name", parsed_args.model,
+            "--learning-rate", str(parsed_args.learning_rate),
             "--num-epochs", str(parsed_args.epochs),
             "--batch-size", str(parsed_args.batch_size),
             "--group-size", str(parsed_args.group_size),
+            "--max-length", str(parsed_args.max_length),
+            "--max-prompt-length", str(parsed_args.max_prompt_length),
+            "--prompt-problem-type", parsed_args.prompt_problem_type,
+            "--verifier-timeout", str(parsed_args.verifier_timeout),
+            "--code-docker-image", parsed_args.code_docker_image,
+            "--code-memory-limit", parsed_args.code_memory_limit,
+            "--kl-threshold", str(parsed_args.kl_threshold),
+            "--eval-interval-steps", str(parsed_args.eval_interval_steps),
             "--online-max-new-tokens", str(parsed_args.online_max_new_tokens),
             "--online-temperature", str(parsed_args.online_temperature),
             "--online-top-p", str(parsed_args.online_top_p),
             "--online-resample-attempts", str(parsed_args.online_resample_attempts),
+            "--online-min-reward-std", str(parsed_args.online_min_reward_std),
             "--ray-verifier-workers", str(parsed_args.ray_verifier_workers),
             "--heldout-dataset", parsed_args.heldout_dataset,
             "--heldout-split", parsed_args.heldout_split,
             "--heldout-eval-size", str(parsed_args.heldout_eval_size),
+            "--eval-max-new-tokens", str(parsed_args.eval_max_new_tokens),
             "--best-checkpoint-metric", parsed_args.best_checkpoint_metric,
             "--min-eval-improvement", str(parsed_args.min_eval_improvement),
             "--early-stop-patience", str(parsed_args.early_stop_patience),
+            "--wandb-project", parsed_args.wandb_project,
+            "--wandb-mode", parsed_args.wandb_mode,
+            "--distributed-timeout-minutes", str(parsed_args.distributed_timeout_minutes),
             "--num-gpus", str(parsed_args.num_gpus),
         ]
         if parsed_args.enable_ray_verification and not parsed_args.disable_ray_verification:
@@ -80,30 +94,56 @@ def cmd_train_grpo(args):
             forwarded.append("--save-best-checkpoint")
         if parsed_args.disable_save_best_checkpoint:
             forwarded.append("--disable-save-best-checkpoint")
+        if parsed_args.bf16 and not parsed_args.no_bf16:
+            forwarded.append("--bf16")
+        if parsed_args.no_bf16:
+            forwarded.append("--no-bf16")
+        if parsed_args.gradient_checkpointing and not parsed_args.no_gradient_checkpointing:
+            forwarded.append("--gradient-checkpointing")
+        if parsed_args.no_gradient_checkpointing:
+            forwarded.append("--no-gradient-checkpointing")
         return forwarded
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-path', type=str, required=True)
     parser.add_argument('--output-dir', type=str, default='./grpo_output')
     parser.add_argument('--model', type=str, default='Qwen/Qwen2.5-7B-Instruct')
+    parser.add_argument('--learning-rate', type=float, default=5e-5)
     parser.add_argument('--epochs', type=int, default=1)
     parser.add_argument('--batch-size', type=int, default=2)
     parser.add_argument('--group-size', type=int, default=8)
+    parser.add_argument('--max-length', type=int, default=1024)
+    parser.add_argument('--max-prompt-length', type=int, default=256)
+    parser.add_argument('--prompt-problem-type', type=str, default='math')
+    parser.add_argument('--verifier-timeout', type=int, default=10)
+    parser.add_argument('--code-docker-image', type=str, default='distributed-reasoning-loop-sandbox:latest')
+    parser.add_argument('--code-memory-limit', type=str, default='512m')
+    parser.add_argument('--kl-threshold', type=float, default=0.1)
+    parser.add_argument('--eval-interval-steps', type=int, default=50)
     parser.add_argument('--online-max-new-tokens', type=int, default=256)
     parser.add_argument('--online-temperature', type=float, default=0.8)
     parser.add_argument('--online-top-p', type=float, default=0.95)
     parser.add_argument('--online-resample-attempts', type=int, default=2)
+    parser.add_argument('--online-min-reward-std', type=float, default=1e-6)
     parser.add_argument('--enable-ray-verification', action='store_true')
     parser.add_argument('--disable-ray-verification', action='store_true')
     parser.add_argument('--ray-verifier-workers', type=int, default=4)
     parser.add_argument('--heldout-dataset', type=str, default='gsm8k')
     parser.add_argument('--heldout-split', type=str, default='test')
     parser.add_argument('--heldout-eval-size', type=int, default=20)
+    parser.add_argument('--eval-max-new-tokens', type=int, default=256)
     parser.add_argument('--save-best-checkpoint', action='store_true')
     parser.add_argument('--disable-save-best-checkpoint', action='store_true')
     parser.add_argument('--best-checkpoint-metric', type=str, default='pass_at_1')
     parser.add_argument('--min-eval-improvement', type=float, default=1e-4)
     parser.add_argument('--early-stop-patience', type=int, default=0)
+    parser.add_argument('--wandb-project', type=str, default='distributed-reasoning-loop')
+    parser.add_argument('--wandb-mode', type=str, default='offline')
+    parser.add_argument('--bf16', action='store_true')
+    parser.add_argument('--no-bf16', action='store_true')
+    parser.add_argument('--gradient-checkpointing', action='store_true')
+    parser.add_argument('--no-gradient-checkpointing', action='store_true')
+    parser.add_argument('--distributed-timeout-minutes', type=int, default=0)
     parser.add_argument('--num-gpus', type=str, default='auto')
     
     grpo_args = parser.parse_args(args.remaining)
@@ -117,13 +157,23 @@ def cmd_train_grpo(args):
         data_path=grpo_args.data_path,
         output_dir=grpo_args.output_dir,
         model_name=grpo_args.model,
+        learning_rate=grpo_args.learning_rate,
         num_epochs=grpo_args.epochs,
         batch_size=grpo_args.batch_size,
         group_size=grpo_args.group_size,
+        max_length=grpo_args.max_length,
+        max_prompt_length=grpo_args.max_prompt_length,
+        prompt_problem_type=grpo_args.prompt_problem_type,
+        verifier_timeout=grpo_args.verifier_timeout,
+        code_docker_image=grpo_args.code_docker_image,
+        code_memory_limit=grpo_args.code_memory_limit,
+        kl_threshold=grpo_args.kl_threshold,
+        eval_interval_steps=grpo_args.eval_interval_steps,
         online_max_new_tokens=grpo_args.online_max_new_tokens,
         online_temperature=grpo_args.online_temperature,
         online_top_p=grpo_args.online_top_p,
         online_resample_attempts=grpo_args.online_resample_attempts,
+        online_min_reward_std=grpo_args.online_min_reward_std,
         enable_ray_verification=(
             False
             if grpo_args.disable_ray_verification
@@ -133,6 +183,7 @@ def cmd_train_grpo(args):
         heldout_dataset=grpo_args.heldout_dataset,
         heldout_split=grpo_args.heldout_split,
         heldout_eval_size=grpo_args.heldout_eval_size,
+        eval_max_new_tokens=grpo_args.eval_max_new_tokens,
         save_best_checkpoint=(
             False
             if grpo_args.disable_save_best_checkpoint
@@ -141,6 +192,11 @@ def cmd_train_grpo(args):
         best_checkpoint_metric=grpo_args.best_checkpoint_metric,
         min_eval_improvement=grpo_args.min_eval_improvement,
         early_stop_patience=grpo_args.early_stop_patience,
+        wandb_project=grpo_args.wandb_project,
+        wandb_mode=grpo_args.wandb_mode,
+        bf16=False if grpo_args.no_bf16 else True,
+        gradient_checkpointing=False if grpo_args.no_gradient_checkpointing else True,
+        distributed_timeout_minutes=grpo_args.distributed_timeout_minutes,
     )
 
 

@@ -320,20 +320,115 @@ def run_dpo_training(config, data_path, dataset_name, base_model=None):
 
 def run_grpo_training(config, data_path, dataset_name, base_model=None):
     """Run GRPO training phase."""
-    from training.grpo_trainer import GRPOConfig, ReasoningGRPOTrainer
+    import sys
+
+    try:
+        grpo_training_module = sys.modules.get("training.grpo_trainer")
+        if grpo_training_module is None:
+            import training.grpo_trainer as grpo_training_module
+
+        GRPOConfig = grpo_training_module.GRPOConfig
+        ReasoningGRPOTrainer = grpo_training_module.ReasoningGRPOTrainer
+        maybe_launch_grpo_distributed = getattr(
+            grpo_training_module,
+            "maybe_launch_grpo_distributed",
+            None,
+        )
+        train_grpo_from_synthetic_data = getattr(
+            grpo_training_module,
+            "train_grpo_from_synthetic_data",
+            None,
+        )
+    except ImportError:
+        from training import GRPOConfig, ReasoningGRPOTrainer
+
+        maybe_launch_grpo_distributed = None
+        train_grpo_from_synthetic_data = None
     import json
     
     logger.info("=" * 50)
     logger.info("Phase 2b: GRPO Training")
     logger.info("=" * 50)
     
-    # Load data
+    model_name = base_model or config.data_generator.student_model
+    output_dir = f"{config.general.output_dir}/grpo_model"
+
+    if maybe_launch_grpo_distributed is not None and train_grpo_from_synthetic_data is not None:
+        distributed_args = [
+            "--data-path", str(Path(data_path).resolve()),
+            "--output-dir", str(Path(output_dir).resolve()),
+            "--model-name", model_name,
+            "--learning-rate", str(config.training.learning_rate),
+            "--num-epochs", str(config.training.num_epochs),
+            "--batch-size", str(config.training.batch_size),
+            "--group-size", str(config.training.grpo.group_size),
+            "--max-length", str(config.training.dpo.max_length),
+            "--max-prompt-length", str(config.training.dpo.get("max_prompt_length", 512)),
+            "--prompt-problem-type", _dataset_problem_type(dataset_name),
+            "--verifier-type", str(config.verifier.type),
+            "--verifier-timeout", str(config.verifier[config.verifier.type].timeout),
+            "--code-docker-image", str(config.verifier.code.docker_image),
+            "--code-memory-limit", str(config.verifier.code.memory_limit),
+            "--kl-threshold", str(config.training.grpo.kl_threshold),
+            "--eval-interval-steps", str(config.training.grpo.eval_interval_steps),
+            "--heldout-dataset", str(config.training.grpo.heldout_dataset),
+            "--heldout-split", str(config.training.grpo.get("heldout_split", "test")),
+            "--heldout-eval-size", str(config.training.grpo.heldout_eval_size),
+            "--eval-max-new-tokens", str(config.training.grpo.eval_max_new_tokens),
+            "--best-checkpoint-metric", str(config.training.grpo.best_checkpoint_metric),
+            "--min-eval-improvement", str(config.training.grpo.min_eval_improvement),
+            "--early-stop-patience", str(config.training.grpo.early_stop_patience),
+            "--online-max-new-tokens", str(config.training.grpo.online_max_new_tokens),
+            "--online-temperature", str(config.training.grpo.online_temperature),
+            "--online-top-p", str(config.training.grpo.online_top_p),
+            "--online-resample-attempts", str(config.training.grpo.online_resample_attempts),
+            "--online-min-reward-std", str(config.training.grpo.online_min_reward_std),
+            "--ray-verifier-workers", str(config.training.grpo.ray_verifier_workers),
+            "--wandb-project", str(config.training.wandb.project),
+            "--wandb-mode", str(config.training.wandb.mode),
+            "--distributed-timeout-minutes", str(config.training.grpo.get("distributed_timeout_minutes", 0)),
+        ]
+        if bool(config.training.grpo.get("enable_ray_verification", False)):
+            distributed_args.append("--enable-ray-verification")
+        else:
+            distributed_args.append("--disable-ray-verification")
+        if bool(config.training.grpo.get("save_best_checkpoint", True)):
+            distributed_args.append("--save-best-checkpoint")
+        else:
+            distributed_args.append("--disable-save-best-checkpoint")
+        if bool(config.training.grpo.get("bf16", True)):
+            distributed_args.append("--bf16")
+        else:
+            distributed_args.append("--no-bf16")
+        if bool(config.training.grpo.get("gradient_checkpointing", True)):
+            distributed_args.append("--gradient-checkpointing")
+        else:
+            distributed_args.append("--no-gradient-checkpointing")
+
+        requested_num_gpus = str(config.training.grpo.get("num_gpus", "auto"))
+        if maybe_launch_grpo_distributed(distributed_args, requested_num_gpus=requested_num_gpus):
+            with open(data_path) as handle:
+                pair_count = sum(1 for _ in handle)
+            write_stage_manifest(
+                output_dir,
+                {
+                    "stage": "grpo",
+                    "base_model": model_name,
+                    "source_data": str(Path(data_path).resolve()),
+                    "pair_count": pair_count,
+                    "heldout_dataset": config.training.grpo.heldout_dataset,
+                    "problem_type": _dataset_problem_type(dataset_name),
+                    "distributed_launch": True,
+                    "requested_num_gpus": requested_num_gpus,
+                },
+            )
+            return output_dir
+
+    # Load data for in-process fallback path.
     data = []
     with open(data_path) as f:
         for line in f:
             data.append(json.loads(line))
-    
-    model_name = base_model or config.data_generator.student_model
     
     grpo_config = _construct_with_supported_kwargs(
         GRPOConfig,
@@ -366,7 +461,7 @@ def run_grpo_training(config, data_path, dataset_name, base_model=None):
         prompt_problem_type=_dataset_problem_type(dataset_name),
         wandb_project=config.training.wandb.project,
         wandb_mode=config.training.wandb.mode,
-        output_dir=f"{config.general.output_dir}/grpo_model",
+        output_dir=output_dir,
     )
     
     trainer = ReasoningGRPOTrainer(grpo_config)
