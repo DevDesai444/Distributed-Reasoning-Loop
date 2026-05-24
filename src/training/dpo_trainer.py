@@ -16,8 +16,8 @@ from torch.utils.data import Dataset, DataLoader
 from prompting import format_prompt
 
 from .runtime_utils import (
-    build_causal_lm_load_kwargs,
     get_runtime_dtype,
+    load_causal_lm_for_training,
 )
 
 logger = logging.getLogger(__name__)
@@ -154,10 +154,12 @@ class ReasoningDPOTrainer:
         self.tokenizer = None
         self.trainer = None
         self.use_kbit_training = False
+        self.loaded_adapter_checkpoint = False
+        self.loaded_base_model_name = None
         
     def setup(self):
         """Setup model, tokenizer, and trainer."""
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoTokenizer
         
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -168,19 +170,26 @@ class ReasoningDPOTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
         # Load model
-        model_kwargs, self.use_kbit_training = build_causal_lm_load_kwargs(
+        (
+            self.model,
+            self.use_kbit_training,
+            self.loaded_adapter_checkpoint,
+            self.loaded_base_model_name,
+        ) = load_causal_lm_for_training(
+            self.config.model_name,
             prefer_bf16=self.config.bf16,
             allow_8bit=self.config.use_lora,
         )
-        
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.config.model_name,
-            **model_kwargs,
-        )
-        
+
         # Apply LoRA if configured
-        if self.config.use_lora:
+        if self.config.use_lora and not self.loaded_adapter_checkpoint:
             self._apply_lora()
+        elif self.loaded_adapter_checkpoint:
+            logger.info(
+                "Resuming DPO from adapter checkpoint %s (base model: %s)",
+                self.config.model_name,
+                self.loaded_base_model_name,
+            )
         
         # Enable gradient checkpointing
         if self.config.gradient_checkpointing:
@@ -226,74 +235,73 @@ class ReasoningDPOTrainer:
         try:
             from trl import DPOTrainer, DPOConfig
             from datasets import Dataset as HFDataset
-            
-            self.setup()
-            
-            def _format_pair(item: Dict[str, str]) -> Dict[str, str]:
-                prompt = item.get("prompt", item.get("problem", ""))
-                return {
-                    "prompt": format_prompt(
-                        self.tokenizer,
-                        prompt,
-                        problem_type=self.config.problem_type,
-                    ),
-                    "chosen": item.get("chosen", ""),
-                    "rejected": item.get("rejected", ""),
-                }
+        except ImportError as exc:
+            raise ImportError("TRL required for DPO training. Install with: pip install trl") from exc
 
-            # Create HuggingFace datasets with prompt formatting aligned to inference.
-            train_dataset = HFDataset.from_list([_format_pair(item) for item in train_data])
-            eval_dataset = (
-                HFDataset.from_list([_format_pair(item) for item in eval_data])
-                if eval_data
-                else None
-            )
+        self.setup()
             
-            # DPO training config
-            training_args = DPOConfig(
-                output_dir=self.config.output_dir,
-                num_train_epochs=self.config.num_epochs,
-                per_device_train_batch_size=self.config.batch_size,
-                per_device_eval_batch_size=self.config.batch_size,
-                gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-                learning_rate=self.config.learning_rate,
-                warmup_ratio=self.config.warmup_ratio,
-                weight_decay=self.config.weight_decay,
-                max_grad_norm=self.config.max_grad_norm,
-                logging_steps=self.config.logging_steps,
-                eval_steps=self.config.eval_steps if eval_data else None,
-                save_steps=self.config.save_steps,
-                eval_strategy="steps" if eval_data else "no",
-                fp16=self.config.fp16 and torch.cuda.is_available(),
-                bf16=self.config.bf16 and torch.cuda.is_available(),
-                beta=self.config.beta,
-                loss_type=self.config.loss_type,
-                max_length=self.config.max_length,
-                max_prompt_length=self.config.max_prompt_length,
-                remove_unused_columns=False,
-            )
-            
-            # Create DPO trainer
-            self.trainer = DPOTrainer(
-                model=self.model,
-                ref_model=self.ref_model,
-                args=training_args,
-                train_dataset=train_dataset,
-                eval_dataset=eval_dataset,
-                processing_class=self.tokenizer,
-            )
-            
-            # Train
-            logger.info("Starting DPO training...")
-            self.trainer.train()
-            
-            # Save final model
-            self.save()
-            
-            logger.info(f"Training complete. Model saved to {self.config.output_dir}")
-            
-        except ImportError:
-            raise ImportError("TRL required for DPO training. Install with: pip install trl")
+        def _format_pair(item: Dict[str, str]) -> Dict[str, str]:
+            prompt = item.get("prompt", item.get("problem", ""))
+            return {
+                "prompt": format_prompt(
+                    self.tokenizer,
+                    prompt,
+                    problem_type=self.config.problem_type,
+                ),
+                "chosen": item.get("chosen", ""),
+                "rejected": item.get("rejected", ""),
+            }
+
+        # Create HuggingFace datasets with prompt formatting aligned to inference.
+        train_dataset = HFDataset.from_list([_format_pair(item) for item in train_data])
+        eval_dataset = (
+            HFDataset.from_list([_format_pair(item) for item in eval_data])
+            if eval_data
+            else None
+        )
+        
+        # DPO training config
+        training_args = DPOConfig(
+            output_dir=self.config.output_dir,
+            num_train_epochs=self.config.num_epochs,
+            per_device_train_batch_size=self.config.batch_size,
+            per_device_eval_batch_size=self.config.batch_size,
+            gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+            learning_rate=self.config.learning_rate,
+            warmup_ratio=self.config.warmup_ratio,
+            weight_decay=self.config.weight_decay,
+            max_grad_norm=self.config.max_grad_norm,
+            logging_steps=self.config.logging_steps,
+            eval_steps=self.config.eval_steps if eval_data else None,
+            save_steps=self.config.save_steps,
+            eval_strategy="steps" if eval_data else "no",
+            fp16=self.config.fp16 and torch.cuda.is_available(),
+            bf16=self.config.bf16 and torch.cuda.is_available(),
+            beta=self.config.beta,
+            loss_type=self.config.loss_type,
+            max_length=self.config.max_length,
+            max_prompt_length=self.config.max_prompt_length,
+            remove_unused_columns=False,
+        )
+        
+        # Create DPO trainer
+        self.trainer = DPOTrainer(
+            model=self.model,
+            ref_model=self.ref_model,
+            args=training_args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            processing_class=self.tokenizer,
+        )
+        
+        # Train
+        logger.info("Starting DPO training...")
+        self.trainer.train()
+        
+        # Save final model
+        self.save()
+        
+        logger.info(f"Training complete. Model saved to {self.config.output_dir}")
     
     def save(self, path: Optional[str] = None):
         """Save the trained model."""

@@ -6,7 +6,8 @@ import importlib.util
 import logging
 import os
 from functools import lru_cache
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
 import torch
 
@@ -87,3 +88,82 @@ def build_causal_lm_load_kwargs(
             )
 
     return kwargs, use_8bit
+
+
+def is_adapter_checkpoint(model_name_or_path: str) -> bool:
+    """Return True when the provided path looks like a PEFT adapter checkpoint."""
+    path = Path(model_name_or_path)
+    return path.exists() and (path / "adapter_config.json").exists()
+
+
+def _mark_adapter_parameters_trainable(model) -> None:
+    """Best-effort fallback for older PEFT versions without is_trainable support."""
+    trainable_markers = ("lora_", "adapter_", "modules_to_save")
+    for name, parameter in model.named_parameters():
+        parameter.requires_grad = any(marker in name for marker in trainable_markers)
+
+
+def load_causal_lm_for_training(
+    model_name_or_path: str,
+    *,
+    prefer_bf16: bool = False,
+    allow_8bit: bool = False,
+    device_map_override: Optional[Any] = None,
+) -> tuple[Any, bool, bool, Optional[str]]:
+    """
+    Load either a base model or a PEFT adapter checkpoint for continued training.
+
+    Returns:
+        model: Loaded model instance.
+        use_8bit: Whether 8-bit loading is active.
+        loaded_adapter: True when the input path was an adapter checkpoint.
+        base_model_name: Base model used for adapter checkpoints, otherwise None.
+    """
+    from transformers import AutoModelForCausalLM
+
+    model_kwargs, use_8bit = build_causal_lm_load_kwargs(
+        prefer_bf16=prefer_bf16,
+        allow_8bit=allow_8bit,
+    )
+    if device_map_override is not None:
+        model_kwargs.pop("device_map", None)
+        model_kwargs["device_map"] = device_map_override
+
+    if not is_adapter_checkpoint(model_name_or_path):
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name_or_path,
+            **model_kwargs,
+        )
+        return model, use_8bit, False, None
+
+    from peft import PeftConfig, PeftModel
+
+    peft_config = PeftConfig.from_pretrained(model_name_or_path)
+    base_model_name = peft_config.base_model_name_or_path
+    if not base_model_name:
+        raise ValueError(
+            f"Adapter checkpoint at {model_name_or_path!r} is missing base_model_name_or_path."
+        )
+
+    logger.info(
+        "Detected adapter checkpoint at %s; loading base model %s for continued training.",
+        model_name_or_path,
+        base_model_name,
+    )
+
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_model_name,
+        **model_kwargs,
+    )
+
+    try:
+        model = PeftModel.from_pretrained(
+            base_model,
+            model_name_or_path,
+            is_trainable=True,
+        )
+    except TypeError:
+        model = PeftModel.from_pretrained(base_model, model_name_or_path)
+        _mark_adapter_parameters_trainable(model)
+
+    return model, use_8bit, True, base_model_name

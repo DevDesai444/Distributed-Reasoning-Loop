@@ -33,9 +33,17 @@ from wandb_utils import ensure_wandb_run, log_to_wandb
 from prompting import format_conversation, format_prompt
 
 try:
-    from .runtime_utils import build_causal_lm_load_kwargs, get_runtime_device
+    from .runtime_utils import (
+        build_causal_lm_load_kwargs,
+        get_runtime_device,
+        load_causal_lm_for_training,
+    )
 except ImportError:
-    from training.runtime_utils import build_causal_lm_load_kwargs, get_runtime_device
+    from training.runtime_utils import (
+        build_causal_lm_load_kwargs,
+        get_runtime_device,
+        load_causal_lm_for_training,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -387,6 +395,8 @@ class ReasoningGRPOTrainer:
         self.best_eval_score: Optional[float] = None
         self.best_eval_step: Optional[int] = None
         self.no_improvement_evals: int = 0
+        self.loaded_adapter_checkpoint = False
+        self.loaded_base_model_name: Optional[str] = None
 
     def _is_main_process(self) -> bool:
         return self.rank == 0
@@ -558,16 +568,20 @@ class ReasoningGRPOTrainer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        model_kwargs, self.use_kbit_training = build_causal_lm_load_kwargs(
+        device_map_override = None
+        if self.distributed and torch.cuda.is_available():
+            device_map_override = {"": self.local_rank}
+
+        (
+            self.model,
+            self.use_kbit_training,
+            self.loaded_adapter_checkpoint,
+            self.loaded_base_model_name,
+        ) = load_causal_lm_for_training(
+            self.config.model_name,
             prefer_bf16=self.config.bf16,
             allow_8bit=self.config.use_lora,
-        )
-        if self.distributed and torch.cuda.is_available():
-            model_kwargs.pop("device_map", None)
-            model_kwargs["device_map"] = {"": self.local_rank}
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.config.model_name,
-            **model_kwargs,
+            device_map_override=device_map_override,
         )
         if torch.cuda.is_available():
             if self.distributed:
@@ -575,8 +589,14 @@ class ReasoningGRPOTrainer:
         else:
             self.model.to(self.device)
 
-        if self.config.use_lora:
+        if self.config.use_lora and not self.loaded_adapter_checkpoint:
             self._apply_lora()
+        elif self.loaded_adapter_checkpoint:
+            logger.info(
+                "Resuming GRPO from adapter checkpoint %s (base model: %s)",
+                self.config.model_name,
+                self.loaded_base_model_name,
+            )
         else:
             for param in self.model.parameters():
                 param.requires_grad = True
