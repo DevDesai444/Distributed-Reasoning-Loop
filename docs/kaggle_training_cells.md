@@ -20,3 +20,14 @@ After installing the editable package, run a diagnostics check with:
 env = build_runtime_env(training=True)
 run("python -m bitsandbytes", cwd=REPO_DIR, env=env, check=False)
 ```
+
+## Cell 7: Initial GPU Check
+
+Change the environment creation to generation mode:
+
+```python
+env = build_runtime_env(training=False)
+run("nvidia-smi", cwd=REPO_DIR, env=env, check=False)
+```
+
+This keeps bitsandbytes requirements off during generation while preserving the CUDA/vLLM environment setup.
