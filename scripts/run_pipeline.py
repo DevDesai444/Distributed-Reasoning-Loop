@@ -28,6 +28,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _log_cuda_memory(label: str) -> None:
+    """Log CUDA memory when the real training package is available."""
+    try:
+        from training.runtime_utils import log_cuda_memory
+    except Exception:
+        return
+    log_cuda_memory(label)
+
+
+def _require_cuda_free_memory(config, label: str) -> None:
+    """Fail early on occupied GPUs without making tests depend on torch/CUDA imports."""
+    try:
+        from training.runtime_utils import require_cuda_free_memory
+    except Exception:
+        return
+    require_cuda_free_memory(
+        label,
+        float(config.training.get("min_free_gpu_gib", 4.0)),
+    )
+
+
 def stream_pipeline_data_to_kafka(config, samples, pairs):
     """Optionally stream pipeline artifacts to Kafka topics."""
     kafka_cfg = config.orchestration.kafka
@@ -247,8 +268,16 @@ def run_sft_training(config, data_path, dataset_name):
     logger.info("=" * 50)
     logger.info("Phase 2a: Supervised Fine-Tuning")
     logger.info("=" * 50)
+    _log_cuda_memory("Before SFT")
+    _require_cuda_free_memory(config, "SFT training")
     
     sft_overrides = config.training.get("sft", {})
+    quantization_mode = str(
+        sft_overrides.get(
+            "quantization_mode",
+            config.training.get("quantization_mode", "auto"),
+        )
+    )
     sft_config = _construct_with_supported_kwargs(
         SFTTrainerConfig,
         model_name=config.data_generator.student_model,
@@ -263,6 +292,7 @@ def run_sft_training(config, data_path, dataset_name):
         fp16=bool(sft_overrides.get("fp16", True)),
         bf16=bool(sft_overrides.get("bf16", False)),
         gradient_checkpointing=bool(sft_overrides.get("gradient_checkpointing", True)),
+        quantization_mode=quantization_mode,
         packing=bool(sft_overrides.get("packing", False)),
         output_dir=f"{config.general.output_dir}/sft_model",
     )
@@ -290,6 +320,8 @@ def run_dpo_training(config, data_path, dataset_name, base_model=None):
     logger.info("=" * 50)
     logger.info("Phase 2b: DPO Training")
     logger.info("=" * 50)
+    _log_cuda_memory("Before DPO")
+    _require_cuda_free_memory(config, "DPO training")
     
     # Load DPO data
     data = []
@@ -308,6 +340,7 @@ def run_dpo_training(config, data_path, dataset_name, base_model=None):
         num_epochs=config.training.num_epochs,
         max_length=config.training.dpo.max_length,
         problem_type=_dataset_problem_type(dataset_name),
+        quantization_mode=str(config.training.get("quantization_mode", "auto")),
         output_dir=f"{config.general.output_dir}/dpo_model",
     )
     
@@ -358,6 +391,8 @@ def run_grpo_training(config, data_path, dataset_name, base_model=None):
     logger.info("=" * 50)
     logger.info("Phase 2b: GRPO Training")
     logger.info("=" * 50)
+    _log_cuda_memory("Before GRPO")
+    _require_cuda_free_memory(config, "GRPO training")
     
     model_name = base_model or config.data_generator.student_model
     output_dir = f"{config.general.output_dir}/grpo_model"
@@ -397,6 +432,10 @@ def run_grpo_training(config, data_path, dataset_name, base_model=None):
             "--wandb-mode", str(config.training.wandb.mode),
             "--distributed-timeout-minutes", str(config.training.grpo.get("distributed_timeout_minutes", 0)),
         ]
+        if "quantization_mode" in config.training:
+            distributed_args.extend(
+                ["--quantization-mode", str(config.training.quantization_mode)]
+            )
         if bool(config.training.grpo.get("enable_ray_verification", False)):
             distributed_args.append("--enable-ray-verification")
         else:
@@ -470,6 +509,7 @@ def run_grpo_training(config, data_path, dataset_name, base_model=None):
         prompt_problem_type=_dataset_problem_type(dataset_name),
         wandb_project=config.training.wandb.project,
         wandb_mode=config.training.wandb.mode,
+        quantization_mode=str(config.training.get("quantization_mode", "auto")),
         output_dir=output_dir,
     )
     
