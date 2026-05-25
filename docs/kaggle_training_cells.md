@@ -60,3 +60,32 @@ accelerator_process_report(env=attempt_env)
 ```
 
 This makes it obvious whether vLLM workers are still occupying GPU memory before training starts.
+
+## Cell 12: Full Training Run
+
+Keep the full training command. Do not add `--skip-sft`.
+
+Before launching the command, switch to training mode and print the GPU/process state:
+
+```python
+clear_vllm_caches(stop_workers=True)
+train_env = build_runtime_env(training=True)
+accelerator_process_report(env=train_env)
+```
+
+The command should still include:
+
+```python
+f"--training-method best "
+```
+
+If this cell fails because quantization is unavailable, fix the bitsandbytes/CUDA install instead of disabling quantization.
+
+## Cells 16 and 17: Evaluation
+
+Use generation mode for evaluation environments:
+
+```python
+eval_env = build_runtime_env(training=False)
+ttc_env = build_runtime_env(training=False)
+```
