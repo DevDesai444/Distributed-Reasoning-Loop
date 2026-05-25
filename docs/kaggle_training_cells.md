@@ -31,3 +31,15 @@ run("nvidia-smi", cwd=REPO_DIR, env=env, check=False)
 ```
 
 This keeps bitsandbytes requirements off during generation while preserving the CUDA/vLLM environment setup.
+
+## Cell 8: Training Config
+
+Set explicit quantized LoRA training options after `cfg.training.num_epochs = 1`:
+
+```python
+cfg.training.quantization_mode = "4bit"
+cfg.training.min_free_gpu_gib = 4.0
+cfg.training.sft.quantization_mode = "4bit"
+```
+
+Keep `cfg.training.method = "best"` so the run still performs SFT, DPO, and GRPO.
