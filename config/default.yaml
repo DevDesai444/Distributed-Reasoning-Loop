@@ -74,6 +74,8 @@ training:
   batch_size: 2
   learning_rate: 1e-6
   num_epochs: 1
+  quantization_mode: "auto"
+  min_free_gpu_gib: 4.0
 
   sft:
     gradient_accumulation_steps: 4
