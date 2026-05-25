@@ -56,6 +56,7 @@ class SFTTrainerConfig:
     fp16: bool = True
     bf16: bool = False
     gradient_checkpointing: bool = True
+    quantization_mode: str = "auto"
     
     # Data
     packing: bool = False  # Pack multiple samples into one sequence
@@ -90,6 +91,7 @@ class ReasoningSFTTrainer:
         model_kwargs, self.use_kbit_training = build_causal_lm_load_kwargs(
             prefer_bf16=self.config.bf16,
             allow_8bit=self.config.use_lora,
+            quantization_mode=self.config.quantization_mode,
         )
         
         self.model = AutoModelForCausalLM.from_pretrained(
