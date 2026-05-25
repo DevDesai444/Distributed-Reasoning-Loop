@@ -43,3 +43,20 @@ cfg.training.sft.quantization_mode = "4bit"
 ```
 
 Keep `cfg.training.method = "best"` so the run still performs SFT, DPO, and GRPO.
+
+## Cell 9: Generation Handoff
+
+Inside each generation attempt, create the env with generation mode and clear lingering workers before launching vLLM:
+
+```python
+attempt_env = build_runtime_env(training=False)
+clear_vllm_caches(stop_workers=True)
+```
+
+After a successful generation run, call:
+
+```python
+accelerator_process_report(env=attempt_env)
+```
+
+This makes it obvious whether vLLM workers are still occupying GPU memory before training starts.
