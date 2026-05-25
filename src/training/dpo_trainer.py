@@ -111,6 +111,7 @@ class DPOTrainerConfig:
     fp16: bool = True
     bf16: bool = False
     gradient_checkpointing: bool = True
+    quantization_mode: str = "auto"
 
 
 class DPODataset(Dataset):
@@ -224,6 +225,7 @@ class ReasoningDPOTrainer:
             self.config.model_name,
             prefer_bf16=self.config.bf16,
             allow_8bit=self.config.use_lora,
+            quantization_mode=self.config.quantization_mode,
         )
 
         # Apply LoRA if configured
