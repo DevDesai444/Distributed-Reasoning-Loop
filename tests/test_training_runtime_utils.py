@@ -12,7 +12,12 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from training.dpo_trainer import DPOTrainerConfig, ReasoningDPOTrainer
-from training.runtime_utils import build_causal_lm_load_kwargs, configure_training_memory, load_causal_lm_for_training
+from training.runtime_utils import (
+    build_causal_lm_load_kwargs,
+    configure_training_memory,
+    load_causal_lm_for_training,
+    require_cuda_free_memory,
+)
 
 
 class _FakeModel:
@@ -191,6 +196,60 @@ def test_build_causal_lm_load_kwargs_prefers_balanced_low_0_on_multi_gpu(monkeyp
     assert use_8bit is False
     assert kwargs["device_map"] == "balanced_low_0"
     assert kwargs["max_memory"] == {0: "14848MiB", 1: "14848MiB"}
+
+
+def test_build_causal_lm_load_kwargs_configures_4bit_quantization(monkeypatch):
+    monkeypatch.delenv("DRL_DISABLE_8BIT", raising=False)
+    monkeypatch.delenv("DRL_QUANTIZATION_MODE", raising=False)
+    monkeypatch.delenv("DRL_REQUIRE_QUANTIZATION", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr("training.runtime_utils.bitsandbytes_available", lambda: True)
+
+    class FakeBitsAndBytesConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        types.SimpleNamespace(BitsAndBytesConfig=FakeBitsAndBytesConfig),
+    )
+
+    kwargs, use_kbit = build_causal_lm_load_kwargs(
+        prefer_bf16=False,
+        allow_8bit=True,
+        quantization_mode="4bit",
+    )
+
+    assert use_kbit is True
+    assert kwargs["device_map"] == "auto"
+    assert kwargs["quantization_config"].kwargs["load_in_4bit"] is True
+    assert kwargs["quantization_config"].kwargs["bnb_4bit_quant_type"] == "nf4"
+
+
+def test_build_causal_lm_load_kwargs_requires_quantization_when_requested(monkeypatch):
+    monkeypatch.setenv("DRL_REQUIRE_QUANTIZATION", "1")
+    monkeypatch.delenv("DRL_DISABLE_8BIT", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr("training.runtime_utils.bitsandbytes_available", lambda: False)
+
+    with pytest.raises(RuntimeError, match="quantization was requested"):
+        build_causal_lm_load_kwargs(
+            prefer_bf16=False,
+            allow_8bit=True,
+            quantization_mode="4bit",
+        )
+
+
+def test_require_cuda_free_memory_fails_fast_when_gpu_is_occupied(monkeypatch):
+    gib = 1024 ** 3
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (int(0.5 * gib), int(15 * gib)))
+
+    with pytest.raises(RuntimeError, match="only 0.50 GiB is free"):
+        require_cuda_free_memory("SFT training", 4.0)
 
 
 def test_configure_training_memory_disables_use_cache_for_checkpointed_models():
