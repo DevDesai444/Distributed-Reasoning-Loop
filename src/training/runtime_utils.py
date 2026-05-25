@@ -72,20 +72,156 @@ def _multi_gpu_max_memory() -> Optional[dict[int, str]]:
     return max_memory
 
 
+def _normalise_quantization_mode(mode: Optional[str]) -> str:
+    """Return a supported quantization mode from config or environment."""
+    raw_mode = (
+        os.getenv("DRL_QUANTIZATION_MODE")
+        or os.getenv("DRL_QUANTIZATION")
+        or mode
+        or "auto"
+    )
+    normalised = raw_mode.strip().lower().replace("_", "-")
+    aliases = {
+        "": "auto",
+        "true": "auto",
+        "yes": "auto",
+        "on": "auto",
+        "false": "none",
+        "no": "none",
+        "off": "none",
+        "disabled": "none",
+        "disable": "none",
+        "no-quant": "none",
+        "no-quantization": "none",
+        "4": "4bit",
+        "4-bit": "4bit",
+        "nf4": "4bit",
+        "bnb-4bit": "4bit",
+        "8": "8bit",
+        "8-bit": "8bit",
+        "int8": "8bit",
+        "bnb-8bit": "8bit",
+    }
+    normalised = aliases.get(normalised, normalised)
+    if normalised not in {"auto", "4bit", "8bit", "none"}:
+        raise ValueError(
+            "Unsupported quantization mode "
+            f"{raw_mode!r}; expected one of auto, 4bit, 8bit, none."
+        )
+    if os.getenv("DRL_DISABLE_8BIT", "").strip().lower() in {"1", "true", "yes", "on"}:
+        logger.warning(
+            "DRL_DISABLE_8BIT is deprecated; treating it as DRL_QUANTIZATION_MODE=none."
+        )
+        return "none"
+    return normalised
+
+
+def _quantization_required() -> bool:
+    return os.getenv("DRL_REQUIRE_QUANTIZATION", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _configure_bnb_quantization(
+    kwargs: dict[str, Any],
+    *,
+    mode: str,
+    compute_dtype: torch.dtype,
+) -> bool:
+    """Attach a BitsAndBytesConfig when available; return whether k-bit loading is active."""
+    if mode == "none":
+        return False
+
+    if not bitsandbytes_available():
+        message = (
+            "bitsandbytes quantization was requested but its CUDA backend is unavailable. "
+            "Fix the Kaggle CUDA/bitsandbytes install, or set DRL_QUANTIZATION_MODE=none "
+            "and ensure the GPU is fully free before training."
+        )
+        if _quantization_required() or mode in {"4bit", "8bit"}:
+            raise RuntimeError(message)
+        logger.warning("%s Falling back to standard precision model loading.", message)
+        return False
+
+    from transformers import BitsAndBytesConfig
+
+    selected_mode = "4bit" if mode == "auto" else mode
+    if selected_mode == "4bit":
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_use_double_quant=True,
+        )
+        logger.info("Using bitsandbytes 4-bit NF4 loading for LoRA training.")
+        return True
+
+    kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    logger.info("Using bitsandbytes 8-bit loading for LoRA training.")
+    return True
+
+
+def cuda_memory_snapshot() -> Optional[dict[str, float]]:
+    """Return free/total CUDA memory in GiB for the active device, when available."""
+    if not torch.cuda.is_available():
+        return None
+    free_bytes, total_bytes = torch.cuda.mem_get_info()
+    gib = 1024 ** 3
+    return {
+        "free_gib": free_bytes / gib,
+        "total_gib": total_bytes / gib,
+        "used_gib": (total_bytes - free_bytes) / gib,
+    }
+
+
+def log_cuda_memory(label: str) -> None:
+    """Log a concise CUDA memory snapshot."""
+    snapshot = cuda_memory_snapshot()
+    if snapshot is None:
+        logger.info("%s CUDA memory: CUDA unavailable.", label)
+        return
+    logger.info(
+        "%s CUDA memory: %.2f GiB free / %.2f GiB total (%.2f GiB used).",
+        label,
+        snapshot["free_gib"],
+        snapshot["total_gib"],
+        snapshot["used_gib"],
+    )
+
+
+def require_cuda_free_memory(label: str, min_free_gib: float) -> None:
+    """Fail early when a previous stage is still occupying too much GPU memory."""
+    snapshot = cuda_memory_snapshot()
+    if snapshot is None:
+        return
+    if snapshot["free_gib"] < min_free_gib:
+        raise RuntimeError(
+            f"{label} requires at least {min_free_gib:.1f} GiB free CUDA memory, "
+            f"but only {snapshot['free_gib']:.2f} GiB is free. "
+            "A previous vLLM/Ray process is probably still holding the GPU; run nvidia-smi, "
+            "stop those processes, or restart the Kaggle runtime before training."
+        )
+
+
 def build_causal_lm_load_kwargs(
     *,
     prefer_bf16: bool = False,
     allow_8bit: bool = False,
+    quantization_mode: Optional[str] = None,
 ) -> tuple[dict[str, Any], bool]:
     """
     Build model loading kwargs and report whether 8-bit loading is active.
     """
+    dtype = get_runtime_dtype(prefer_bf16=prefer_bf16)
     kwargs = {
         "trust_remote_code": True,
-        "torch_dtype": get_runtime_dtype(prefer_bf16=prefer_bf16),
+        "torch_dtype": dtype,
     }
 
-    use_8bit = False
+    use_kbit = False
     if torch.cuda.is_available():
         if torch.cuda.device_count() > 1:
             kwargs["device_map"] = "balanced_low_0"
@@ -94,23 +230,23 @@ def build_causal_lm_load_kwargs(
                 kwargs["max_memory"] = max_memory
         else:
             kwargs["device_map"] = "auto"
-        if allow_8bit and bitsandbytes_available():
+        if allow_8bit:
+            mode = _normalise_quantization_mode(quantization_mode)
             try:
-                from transformers import BitsAndBytesConfig
-
-                kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
-                use_8bit = True
+                use_kbit = _configure_bnb_quantization(
+                    kwargs,
+                    mode=mode,
+                    compute_dtype=dtype,
+                )
             except Exception as exc:
+                if _quantization_required() or mode in {"4bit", "8bit"}:
+                    raise
                 logger.warning(
-                    "Failed to configure 8-bit quantization; falling back to standard precision model loading: %s",
+                    "Failed to configure k-bit quantization; falling back to standard precision model loading: %s",
                     exc,
                 )
-        elif allow_8bit:
-            logger.warning(
-                "8-bit loading unavailable; falling back to standard precision model loading."
-            )
 
-    return kwargs, use_8bit
+    return kwargs, use_kbit
 
 
 def configure_training_memory(model: Any, *, gradient_checkpointing: bool) -> None:
@@ -151,6 +287,7 @@ def load_causal_lm_for_training(
     *,
     prefer_bf16: bool = False,
     allow_8bit: bool = False,
+    quantization_mode: Optional[str] = None,
     device_map_override: Optional[Any] = None,
 ) -> tuple[Any, bool, bool, Optional[str]]:
     """
@@ -167,6 +304,7 @@ def load_causal_lm_for_training(
     model_kwargs, use_8bit = build_causal_lm_load_kwargs(
         prefer_bf16=prefer_bf16,
         allow_8bit=allow_8bit,
+        quantization_mode=quantization_mode,
     )
     if device_map_override is not None:
         model_kwargs.pop("device_map", None)
