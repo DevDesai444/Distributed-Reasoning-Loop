@@ -8,10 +8,20 @@ Replace the old helper cell with a version that removes `DRL_DISABLE_8BIT`, expo
 
 ## Cell 6: Dependencies
 
-Add `nvidia-nvjitlink-cu13` to the install command so Kaggle CUDA 13 runtimes expose `libnvJitLink.so.13` to bitsandbytes:
+Keep NVIDIA nvJitLink separate from the main install. The PyPI shim package `nvidia-nvjitlink-cu13` can try to build from source on Kaggle; install the actual CUDA 13 wheel from NVIDIA's package index instead.
 
 ```python
-"transformers accelerate datasets trl peft bitsandbytes nvidia-nvjitlink-cu13 "
+run(
+    "python -m pip install -q "
+    "transformers accelerate datasets trl peft bitsandbytes "
+    "sympy omegaconf tqdm wandb pandas numpy tabulate hydra-core sentencepiece vllm",
+    cwd=REPO_DIR,
+)
+run(
+    "python -m pip install -q --extra-index-url https://pypi.nvidia.com "
+    "nvidia-nvjitlink==13.0.88",
+    cwd=REPO_DIR,
+)
 ```
 
 After installing the editable package, run a diagnostics check with:
