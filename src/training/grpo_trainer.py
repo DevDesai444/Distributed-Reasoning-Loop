@@ -271,6 +271,7 @@ class GRPOConfig:
 
     bf16: bool = True
     gradient_checkpointing: bool = True
+    quantization_mode: str = "auto"
     distributed_timeout_minutes: int = 0
 
     verifier_type: str = "math"
@@ -583,6 +584,7 @@ class ReasoningGRPOTrainer:
             self.config.model_name,
             prefer_bf16=self.config.bf16,
             allow_8bit=self.config.use_lora,
+            quantization_mode=self.config.quantization_mode,
             device_map_override=device_map_override,
         )
         if torch.cuda.is_available():
@@ -615,6 +617,7 @@ class ReasoningGRPOTrainer:
             ref_model_kwargs, _ = build_causal_lm_load_kwargs(
                 prefer_bf16=self.config.bf16,
                 allow_8bit=True,
+                quantization_mode=self.config.quantization_mode,
             )
             if self.distributed and torch.cuda.is_available():
                 ref_model_kwargs.pop("device_map", None)
@@ -1408,6 +1411,7 @@ def train_grpo_from_synthetic_data(
     wandb_mode: str = "offline",
     bf16: bool = True,
     gradient_checkpointing: bool = True,
+    quantization_mode: str = "auto",
     distributed_timeout_minutes: int = 0,
 ):
     """Convenience entry point for GRPO training from a JSONL file."""
@@ -1451,6 +1455,7 @@ def train_grpo_from_synthetic_data(
         wandb_mode=wandb_mode,
         bf16=bf16,
         gradient_checkpointing=gradient_checkpointing,
+        quantization_mode=quantization_mode,
         distributed_timeout_minutes=distributed_timeout_minutes,
     )
 
@@ -1514,6 +1519,12 @@ if __name__ == "__main__":
     parser.add_argument("--no-bf16", action="store_true")
     parser.add_argument("--gradient-checkpointing", action="store_true")
     parser.add_argument("--no-gradient-checkpointing", action="store_true")
+    parser.add_argument(
+        "--quantization-mode",
+        choices=["auto", "4bit", "8bit", "none"],
+        default="auto",
+        help="Model loading quantization mode for LoRA training.",
+    )
     parser.add_argument(
         "--distributed-timeout-minutes",
         type=int,
@@ -1592,5 +1603,6 @@ if __name__ == "__main__":
             if args.gradient_checkpointing
             else True
         ),
+        quantization_mode=args.quantization_mode,
         distributed_timeout_minutes=args.distributed_timeout_minutes,
     )
