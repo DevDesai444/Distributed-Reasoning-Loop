@@ -5,3 +5,18 @@ Use these edits in `drlll2.ipynb` before starting a clean Kaggle run from the pu
 ## Cell 3: Runtime Helpers
 
 Replace the old helper cell with a version that removes `DRL_DISABLE_8BIT`, exposes separate generation/training environments, and can report lingering accelerator workers.
+
+## Cell 6: Dependencies
+
+Add `nvidia-nvjitlink-cu13` to the install command so Kaggle CUDA 13 runtimes expose `libnvJitLink.so.13` to bitsandbytes:
+
+```python
+"transformers accelerate datasets trl peft bitsandbytes nvidia-nvjitlink-cu13 "
+```
+
+After installing the editable package, run a diagnostics check with:
+
+```python
+env = build_runtime_env(training=True)
+run("python -m bitsandbytes", cwd=REPO_DIR, env=env, check=False)
+```
