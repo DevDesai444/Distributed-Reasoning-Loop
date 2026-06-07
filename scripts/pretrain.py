@@ -20,8 +20,9 @@ from pathlib import Path
 
 # Allow ``python scripts/pretrain.py`` to find the src/ package.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+for path in (_REPO_ROOT, _REPO_ROOT / "src"):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from src.training.pretraining import (
     PreTrainer,
