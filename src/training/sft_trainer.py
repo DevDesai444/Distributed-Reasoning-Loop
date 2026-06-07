@@ -192,8 +192,18 @@ class ReasoningSFTTrainer:
                     })
                 eval_dataset = HFDataset.from_list(formatted_eval)
             
-            # Training config
-            training_args = SFTConfig(
+            from .accelerate_utils import (
+                hf_training_systems_kwargs,
+                filter_supported_training_args,
+            )
+
+            systems_kwargs = hf_training_systems_kwargs(
+                precision="bf16" if self.config.bf16 else (
+                    "fp32" if not torch.cuda.is_available() else None
+                ),
+            )
+
+            base_kwargs = dict(
                 output_dir=self.config.output_dir,
                 num_train_epochs=self.config.num_epochs,
                 per_device_train_batch_size=self.config.batch_size,
@@ -208,10 +218,15 @@ class ReasoningSFTTrainer:
                 save_steps=self.config.save_steps,
                 eval_strategy="steps" if eval_data else "no",
                 fp16=self.config.fp16 and torch.cuda.is_available(),
-                bf16=self.config.bf16 and torch.cuda.is_available(),
                 max_length=self.config.max_length,
                 packing=self.config.packing,
                 dataset_text_field="text",
+            )
+            base_kwargs.update(systems_kwargs)
+            base_kwargs["bf16"] = base_kwargs.get("bf16", False) and torch.cuda.is_available()
+
+            training_args = SFTConfig(
+                **filter_supported_training_args(SFTConfig, base_kwargs)
             )
             
             # Create trainer
