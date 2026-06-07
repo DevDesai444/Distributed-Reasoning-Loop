@@ -20,7 +20,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset
 
 # Ensure sibling src modules are importable when this file runs as a script.
@@ -39,6 +38,17 @@ try:
         get_runtime_device,
         load_causal_lm_for_training,
     )
+    from .fsdp_utils import (
+        FSDPConfig,
+        init_distributed,
+        is_distributed as fsdp_is_distributed,
+        wrap_with_fsdp,
+    )
+    from .precision import (
+        PrecisionConfig,
+        PrecisionPolicy,
+        env_override_precision,
+    )
 except ImportError:
     from training.runtime_utils import (
         build_causal_lm_load_kwargs,
@@ -46,6 +56,38 @@ except ImportError:
         get_runtime_device,
         load_causal_lm_for_training,
     )
+    from training.fsdp_utils import (
+        FSDPConfig,
+        init_distributed,
+        is_distributed as fsdp_is_distributed,
+        wrap_with_fsdp,
+    )
+    from training.precision import (
+        PrecisionConfig,
+        PrecisionPolicy,
+        env_override_precision,
+    )
+
+
+def _is_fsdp_wrapped(model) -> bool:
+    try:
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+        return isinstance(model, FSDP)
+    except Exception:
+        return False
+
+
+def _summon_full_params(model):
+    """Context manager that gathers FSDP-sharded params for ops like generate()."""
+    try:
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+        if isinstance(model, FSDP):
+            return FSDP.summon_full_params(model, writeback=False, recurse=True)
+    except Exception:
+        pass
+    return nullcontext()
 
 logger = logging.getLogger(__name__)
 
@@ -405,7 +447,9 @@ class ReasoningGRPOTrainer:
         return self.rank == 0
 
     def _unwrap_model(self):
-        return self.model.module if isinstance(self.model, DDP) else self.model
+        if _is_fsdp_wrapped(self.model):
+            return self.model
+        return getattr(self.model, "module", self.model)
 
     def _setup_distributed(self):
         if not self.distributed:
@@ -420,11 +464,10 @@ class ReasoningGRPOTrainer:
             backend = "gloo"
 
         effective_timeout = _resolve_distributed_timeout(self.config.distributed_timeout_minutes)
-        if not dist.is_initialized():
-            dist.init_process_group(
-                backend=backend,
-                timeout=effective_timeout,
-            )
+        init_distributed(
+            backend=backend,
+            timeout_s=int(effective_timeout.total_seconds()),
+        )
         logger.info(
             "Initialized distributed GRPO rank=%s local_rank=%s world_size=%s backend=%s timeout_minutes=%s effective_timeout=%s",
             self.rank,
@@ -534,7 +577,7 @@ class ReasoningGRPOTrainer:
 
         was_training = self.model.training
         self.model.eval()
-        with torch.no_grad():
+        with torch.no_grad(), _summon_full_params(self.model):
             outputs = policy_model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -634,11 +677,32 @@ class ReasoningGRPOTrainer:
             self.ref_model.eval()
 
         if self.distributed:
-            self.model = DDP(
+            precision_str = env_override_precision(
+                default="bf16" if self.config.bf16 else "fp32"
+            )
+            self.precision_policy = PrecisionPolicy(
+                PrecisionConfig(precision=precision_str)
+            )
+            fsdp_cfg = FSDPConfig(
+                sharding_strategy="FULL_SHARD",
+                backward_prefetch="BACKWARD_PRE",
+                activation_checkpointing=True,
+                mixed_precision=True,
+                use_orig_params=True,
+            )
+            self.model = wrap_with_fsdp(
                 self.model,
-                device_ids=[self.local_rank] if torch.cuda.is_available() else None,
-                output_device=self.local_rank if torch.cuda.is_available() else None,
-                find_unused_parameters=False,
+                config=fsdp_cfg,
+                precision=precision_str,
+                device_id=self.local_rank if torch.cuda.is_available() else None,
+            )
+        else:
+            self.precision_policy = PrecisionPolicy(
+                PrecisionConfig(
+                    precision=env_override_precision(
+                        default="bf16" if self.config.bf16 else "fp32"
+                    )
+                )
             )
 
         trainable_params = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
@@ -882,7 +946,7 @@ class ReasoningGRPOTrainer:
         device = next(policy_model.parameters()).device
         inputs = {key: value.to(device) for key, value in inputs.items()}
 
-        with torch.no_grad():
+        with torch.no_grad(), _summon_full_params(self.model):
             outputs = policy_model.generate(
                 **inputs,
                 max_new_tokens=self.config.eval_max_new_tokens,
@@ -1364,15 +1428,23 @@ class ReasoningGRPOTrainer:
         save_path.mkdir(parents=True, exist_ok=True)
         model_to_save = self._unwrap_model()
 
-        if self.config.use_lora and merge_lora and hasattr(model_to_save, "merge_and_unload"):
-            logger.info("Merging LoRA adapters before save")
-            merged_model = model_to_save.merge_and_unload()
-            merged_model.save_pretrained(save_path)
-        else:
-            model_to_save.save_pretrained(save_path)
+        with _summon_full_params(self.model):
+            if (
+                self.config.use_lora
+                and merge_lora
+                and hasattr(model_to_save, "merge_and_unload")
+            ):
+                logger.info("Merging LoRA adapters before save")
+                merged_model = model_to_save.merge_and_unload()
+                if self._is_main_process():
+                    merged_model.save_pretrained(save_path)
+            else:
+                if self._is_main_process():
+                    model_to_save.save_pretrained(save_path)
 
-        self.tokenizer.save_pretrained(save_path)
-        logger.info("Saved GRPO model to %s", save_path)
+        if self._is_main_process():
+            self.tokenizer.save_pretrained(save_path)
+            logger.info("Saved GRPO model to %s", save_path)
 
 
 def train_grpo_from_synthetic_data(
