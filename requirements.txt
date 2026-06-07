@@ -1,9 +1,13 @@
 # Core ML/Inference
-torch>=2.0.0
+torch>=2.3.0
 transformers>=4.36.0
 vllm>=0.4.0
 sglang>=0.1.0
-accelerate>=0.25.0
+accelerate>=0.27.0
+
+# Distributed pre-training, FSDP, FP8
+torchtitan>=0.0.2; platform_system == "Linux"
+transformer-engine>=1.7.0; platform_system == "Linux"
 
 # Distributed Computing
 ray[all]>=2.9.0
