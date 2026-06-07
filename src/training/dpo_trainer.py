@@ -309,7 +309,17 @@ class ReasoningDPOTrainer:
             else None
         )
         
-        # DPO training config
+        from .accelerate_utils import (
+            hf_training_systems_kwargs,
+            filter_supported_training_args,
+        )
+
+        systems_kwargs = hf_training_systems_kwargs(
+            precision="bf16" if self.config.bf16 else (
+                "fp32" if not torch.cuda.is_available() else None
+            ),
+        )
+
         dpo_config_kwargs = {
             "output_dir": self.config.output_dir,
             "num_train_epochs": self.config.num_epochs,
@@ -325,13 +335,16 @@ class ReasoningDPOTrainer:
             "save_steps": self.config.save_steps,
             "eval_strategy": "steps" if eval_data else "no",
             "fp16": self.config.fp16 and torch.cuda.is_available(),
-            "bf16": self.config.bf16 and torch.cuda.is_available(),
             "beta": self.config.beta,
             "loss_type": self.config.loss_type,
             "max_length": self.config.max_length,
             "max_prompt_length": self.config.max_prompt_length,
             "remove_unused_columns": False,
         }
+        dpo_config_kwargs.update(systems_kwargs)
+        dpo_config_kwargs["bf16"] = (
+            dpo_config_kwargs.get("bf16", False) and torch.cuda.is_available()
+        )
         training_args = DPOConfig(
             **_build_supported_kwargs(
                 DPOConfig,

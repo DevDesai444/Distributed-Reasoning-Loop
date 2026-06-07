@@ -16,6 +16,13 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from .runtime_utils import get_runtime_device, get_runtime_dtype
+from .fsdp_utils import (
+    FSDPConfig,
+    init_distributed,
+    is_distributed as fsdp_is_distributed,
+    wrap_with_fsdp,
+)
+from .precision import PrecisionConfig, PrecisionPolicy, env_override_precision
 from wandb_utils import ensure_wandb_run, log_to_wandb, make_histogram
 
 logger = logging.getLogger(__name__)
@@ -258,6 +265,16 @@ class RewardModel(nn.Module):
         )
 
         self.to(self.device)
+
+        init_distributed()
+        precision_str = env_override_precision(default="bf16")
+        self._precision_policy = PrecisionPolicy(PrecisionConfig(precision=precision_str))
+        if fsdp_is_distributed():
+            wrap_with_fsdp(
+                self,
+                config=FSDPConfig(activation_checkpointing=False),
+                precision=precision_str,
+            )
         ensure_wandb_run(
             project=self.config.wandb_project,
             name="reward-model",
@@ -289,9 +306,13 @@ class RewardModel(nn.Module):
                 reward_margin = chosen_rewards - rejected_rewards
                 loss = -F.logsigmoid(reward_margin).mean()
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                self._precision_policy.backward(loss)
+                self._precision_policy.step(
+                    optimizer,
+                    self.parameters(),
+                    step=global_step,
+                )
                 scheduler.step()
 
                 running_loss += loss.item()
