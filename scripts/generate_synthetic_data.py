@@ -116,7 +116,44 @@ def main():
         default=None,
         help="vLLM GPU memory utilization target (0.0-1.0)",
     )
-    
+    parser.add_argument(
+        "--target-pairs",
+        type=int,
+        default=None,
+        help="Target number of unique pairs to emit before stopping (None=run through all problems)",
+    )
+    parser.add_argument(
+        "--with-provenance",
+        dest="with_provenance",
+        action="store_true",
+        default=True,
+        help="Emit pairs in v1 schema with provenance + quality score (default)",
+    )
+    parser.add_argument(
+        "--no-provenance",
+        dest="with_provenance",
+        action="store_false",
+        help="Use the legacy emission path instead of the v1 provenance path",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Resume from the latest checkpoint in the output directory",
+    )
+    parser.add_argument(
+        "--max-pairs-per-problem",
+        type=int,
+        default=8,
+        help="Cap on pairs emitted per problem in the provenance path",
+    )
+    parser.add_argument(
+        "--checkpoint-shard-size",
+        type=int,
+        default=1000,
+        help="Pairs per checkpoint shard in the provenance path",
+    )
+
     args = parser.parse_args()
     
     # Load config
@@ -199,10 +236,30 @@ def main():
     logger.info(f"Paths per problem: {args.num_paths}")
     logger.info(f"Output directory: {args.output_dir}")
     
-    samples, pairs = pipeline.run(
-        subset_size=args.subset_size,
-        batch_size=args.batch_size,
-    )
+    if args.with_provenance:
+        logger.info(
+            "Running provenance (v1) path: target_pairs=%s, resume=%s, max_per_problem=%d",
+            args.target_pairs,
+            args.resume,
+            args.max_pairs_per_problem,
+        )
+        result = pipeline.run_with_provenance(
+            subset_size=args.subset_size,
+            target_pairs=args.target_pairs,
+            max_pairs_per_problem=args.max_pairs_per_problem,
+            resume=args.resume,
+            shard_size=args.checkpoint_shard_size,
+        )
+        logger.info("Provenance run summary: %s", result["stats"])
+        # Map back to (samples, pairs) for the artifact recording below.
+        # We don't materialize raw samples in this path; downstream
+        # consumers should read `dpo_pairs_v1.jsonl` instead.
+        samples, pairs = [], []
+    else:
+        samples, pairs = pipeline.run(
+            subset_size=args.subset_size,
+            batch_size=args.batch_size,
+        )
 
     output_dir = Path(args.output_dir)
     for artifact_name in [
@@ -211,6 +268,7 @@ def main():
         "correct_samples.jsonl",
         "incorrect_samples.jsonl",
         "dpo_pairs.jsonl",
+        "dpo_pairs_v1.jsonl",
         "full_pairs.jsonl",
         "smart_pairs.jsonl",
         "problem_manifest.json",
