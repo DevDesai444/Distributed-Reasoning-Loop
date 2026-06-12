@@ -131,11 +131,69 @@ This turns model outputs into objective labels instead of relying on manual pref
 - `filtered_samples.jsonl`
 - `correct_samples.jsonl`
 - `incorrect_samples.jsonl`
-- `dpo_pairs.jsonl`
+- `dpo_pairs.jsonl` (legacy flat schema)
+- `dpo_pairs_v1.jsonl` (provenance-tagged v1 envelope)
 - `full_pairs.jsonl`
 - `stats.json`
 
 The preprocessing step filters repetitive traces, removes near duplicates, prioritizes high-confidence positives, and builds diverse correct/incorrect preference pairs.
+
+#### v1 Provenance Schema
+
+Every pair emitted by the v1 path carries a `provenance` block and a `quality_score`. The on-disk JSONL envelope is:
+
+```json
+{
+  "pair": {"problem_id": "...", "problem": "...", "prompt": "...", "chosen": "...", "rejected": "...", "expected_answer": "..."},
+  "provenance": {
+    "pair_id": "sha256(problem_id|chosen|rejected)",
+    "problem_id": "gsm8k_train_0123",
+    "source_dataset": "gsm8k",
+    "source_split": "train",
+    "generator_backend": "vllm",
+    "generator_model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "generation_temperature": 0.7,
+    "generation_seed": 42,
+    "verifier_verdict_chosen": "accept",
+    "verifier_verdict_rejected": "reject",
+    "verifier_version": "v1",
+    "dedup_hash_chosen": "...",
+    "dedup_hash_rejected": "...",
+    "quality_score": 0.83,
+    "generated_at": "2026-06-12T...",
+    "schema_version": "1"
+  },
+  "quality_score": 0.83
+}
+```
+
+The quality score is the mean of three [0, 1] components: verifier verdict (1.0 / 0.0), inline `<<a op b = c>>` step coherence, and a length penalty against the running median trace length. See `src/data_generator/quality_score.py`.
+
+#### Generating at Scale
+
+```bash
+# v1 emission path (default), with checkpoint shards under outputs/synthetic_data/checkpoints/
+python main.py generate --dataset gsm8k --num-paths 12 \
+    --target-pairs 30000 --max-pairs-per-problem 8 \
+    --with-provenance --resume
+```
+
+- `--target-pairs N` — stop emitting once N unique pairs have been written.
+- `--max-pairs-per-problem K` — cap combinatorial pair-count per problem.
+- `--resume` — pick up from the latest checkpoint shard. The seen-set is rebuilt from disk so dedup stays correct across restarts.
+- `--no-provenance` — opt back into the legacy emission path.
+
+#### Migrating Legacy Pairs
+
+To rewrite an existing `data/dpo_pairs.jsonl` into the v1 envelope:
+
+```bash
+python scripts/migrate_pairs_to_v1.py data/dpo_pairs.jsonl
+```
+
+The helper is idempotent: re-running on a v1 file is a no-op, and a `.bak` copy of the original is created the first time. Legacy lines come back with `generator_backend: "legacy"` and `quality_score: null` because the original verdicts are not recoverable.
+
+A small CPU-only smoke artifact set lives under `samples/synthetic_smoke/` for exercising the envelope without invoking the LLM.
 
 ### Training Stack
 

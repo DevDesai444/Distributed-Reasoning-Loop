@@ -152,3 +152,46 @@ Interpretation rules:
 The smoke artifact at `samples/robustness_smoke/` is a pipeline-only sample
 produced with a deterministic stub generator; do not treat it as a benchmark
 score.
+
+## Synthetic-Run Manifest
+
+The synthetic data pipeline writes a `stats.json` per run in the output
+directory. With the v1 emission path the manifest is:
+
+```json
+{
+  "schema_version": "1",
+  "total_problems_attempted": 7473,
+  "total_generations": 89124,
+  "verifier_accepts": 44612,
+  "verifier_rejects": 44512,
+  "verifier_accept_rate": 0.5,
+  "pair_candidates": 38400,
+  "unique_pairs_after_dedup": 30245,
+  "dedup_ratio": 0.788,
+  "per_backend": {"vllm": {"generations": 89124, "accepts": 44612}},
+  "quality_score_distribution": {"p50": 0.78, "p90": 0.91, "p99": 0.97},
+  "completed_at": "<iso8601>"
+}
+```
+
+Interpretation rules:
+
+- `verifier_accept_rate` is the fraction of generations the verifier
+  accepted. Sustained drops (below ~0.3 on GSM8K train) usually mean a
+  prompt or sampling regression in the generator.
+- `dedup_ratio` is `unique_pairs_after_dedup / pair_candidates`. A
+  ratio approaching 1.0 on a long run is suspicious — combinatorial
+  expansion at `max_pairs_per_problem=8` should produce some collisions.
+- `quality_score_distribution` is computed only over pairs that made it
+  past dedup. The components are documented in
+  `src/data_generator/quality_score.py`.
+
+Checkpoints under `<output_dir>/checkpoints/pairs_<N>.jsonl` are
+append-safe: a crash leaves a valid prefix and resume rebuilds the seen
+pair-id set from disk. See `scripts/migrate_pairs_to_v1.py` for the
+legacy-to-v1 conversion path.
+
+The smoke artifact at `samples/synthetic_smoke/` is a tiny CPU-only set
+exercising the v1 envelope and checkpointer without invoking the LLM; do
+not treat it as a real generation run.

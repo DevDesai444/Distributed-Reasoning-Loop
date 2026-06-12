@@ -19,3 +19,6 @@ grpo_output/
 sft_output/
 reward_model/
 cache/
+
+# Migration-helper backups; created by scripts/migrate_pairs_to_v1.py
+*.jsonl.bak
