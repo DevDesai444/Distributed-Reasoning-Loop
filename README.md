@@ -277,6 +277,39 @@ produced by `scripts/agreement_smoke.py`) shows the format. It is **not** a
 benchmark claim — it runs against five synthetic problems with a rule-based
 fake judge so the harness works on machines with no GPU and no network.
 
+### Robustness (perturbation retention)
+
+`python main.py eval robust ...` measures how pass@1 holds up under six
+deterministic GSM8K perturbations:
+
+| Perturbation | Label | What it does |
+|---|---|---|
+| number_swap | rewrites gold | Swap one operand in the final multiplicative step; scale gold accordingly |
+| unit_change | rewrites gold | Rewrite a recognised unit (dollars↔cents, hours↔minutes, kg↔g); scale gold |
+| irrelevant_context | preserves | Prepend an unrelated sentence |
+| distractor_sentence | preserves | Insert a sentence with a plausible-looking but irrelevant number |
+| paraphrase | preserves | Rule-based clause/word rewrites (no LLM) |
+| reordering | preserves | Swap the first two sentences when there is no anaphora |
+
+For each perturbation the runner reports applicability rate, per-perturbation
+pass@1 retention with a 95% bootstrap CI on the same subset of problems
+(controlling for difficulty), and an overall robustness score equal to the
+geometric mean of per-perturbation retentions.
+
+```bash
+python main.py eval robust \
+  --model ./outputs/grpo_model \
+  --benchmark gsm8k \
+  --n-problems 200 \
+  --n-samples 4 \
+  --seed 0 \
+  --output-dir ./outputs/robustness_run
+```
+
+A pipeline-smoke artifact (`samples/robustness_smoke/`, produced by
+`scripts/robustness_smoke.py`) exercises the same path with hand-written
+predictions against six inline problems. It is **not** a benchmark claim.
+
 Run on Kaggle T4:
 
 - Use `drlll2_training_ready.ipynb`.

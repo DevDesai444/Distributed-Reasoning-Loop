@@ -111,3 +111,44 @@ Interpretation rules:
 The smoke artifact at `samples/agreement_smoke/agreement_smoke.json` is a
 pipeline-only sample produced from synthetic problems and a rule-based
 stub judge; do not treat it as a benchmark score.
+
+## Robustness-Run Manifest
+
+`python main.py eval robust ...` emits `robustness_results.json`, `report.md`,
+and a `run_manifest.json`. The manifest format:
+
+```json
+{
+  "run_id": "robustness_<UTC_TIMESTAMP>",
+  "kind": "robustness",
+  "timestamp_utc": "<iso8601>",
+  "model": "<policy model id or path>",
+  "benchmark": "gsm8k",
+  "split": "test",
+  "n_problems": 200,
+  "n_samples_per_problem": 4,
+  "seed": 0,
+  "overall_robustness": 0.83,
+  "artifacts": [
+    "robustness_results.json",
+    "report.md"
+  ]
+}
+```
+
+Interpretation rules:
+
+- `robustness_results.json` carries one entry per perturbation in
+  `per_perturbation`, each with `n_applicable`, `applicability_rate`,
+  `matched_baseline_pass_at_1`, `perturbed_pass_at_1`, `retention`,
+  `retention_ci`, and `rewrites_label`.
+- `overall_robustness` is the geometric mean of per-perturbation retentions;
+  it returns `0.0` if any perturbation's retention is undefined or zero —
+  read the per-perturbation table before quoting it.
+- Retention is computed on the matched applicable subset, not on all
+  problems. Compare retentions across runs only when applicability rates
+  are similar.
+
+The smoke artifact at `samples/robustness_smoke/` is a pipeline-only sample
+produced with a deterministic stub generator; do not treat it as a benchmark
+score.
