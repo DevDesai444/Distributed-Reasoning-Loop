@@ -2,12 +2,12 @@
 
 This directory is the receipt that `scripts/launch_distributed.py` runs end to
 end on a CPU-only machine. It is **not a benchmark**. The numbers under
-`outputs/scaling_summary.json` come from a 5-step loop over a 32x32 matmul, so
+`run_outputs/scaling_summary.json` come from a 5-step loop over a 32x32 matmul, so
 nothing here speaks to model quality or real training throughput.
 
 Layout:
 
-- `outputs/scaling_summary.json` — aggregated per-stage throughput, world size,
+- `run_outputs/scaling_summary.json` — aggregated per-stage throughput, world size,
   and (when a baseline is supplied) speedup / efficiency.
 - `logs/rank_0.log` — per-rank init / heartbeat trace. On a multi-rank run there
   is one of these per rank.

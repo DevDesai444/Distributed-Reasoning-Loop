@@ -14,7 +14,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SAMPLE_DIR="${REPO_ROOT}/samples/distributed_smoke"
-OUTPUT_DIR="${SAMPLE_DIR}/outputs"
+# Use `run_outputs/` rather than `outputs/` so the artifact is not swallowed
+# by the top-level outputs/ gitignore rule.
+OUTPUT_DIR="${SAMPLE_DIR}/run_outputs"
 LOG_DIR="${SAMPLE_DIR}/logs"
 
 rm -rf "${SAMPLE_DIR}"
