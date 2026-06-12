@@ -11,6 +11,7 @@ import torch
 
 from prompting import format_conversation
 
+from .distributed import DistributedContext, init_distributed
 from .runtime_utils import (
     build_causal_lm_load_kwargs,
     configure_training_memory,
@@ -57,7 +58,9 @@ class SFTTrainerConfig:
     bf16: bool = False
     gradient_checkpointing: bool = True
     quantization_mode: str = "auto"
-    
+    distributed_timeout_minutes: int = 0
+    ddp_find_unused_parameters: bool = False
+
     # Data
     packing: bool = False  # Pack multiple samples into one sequence
 
@@ -74,11 +77,27 @@ class ReasoningSFTTrainer:
         self.tokenizer = None
         self.trainer = None
         self.use_kbit_training = False
-    
+        # Process-group init is lazy — only happens inside `setup` so unit
+        # tests can construct the trainer without touching torch.distributed.
+        self.dist_ctx: Optional[DistributedContext] = None
+
+    def _ensure_distributed(self) -> DistributedContext:
+        if self.dist_ctx is None:
+            self.dist_ctx = init_distributed(
+                timeout_minutes=self.config.distributed_timeout_minutes,
+            )
+        return self.dist_ctx
+
+    def is_main_process(self) -> bool:
+        ctx = self.dist_ctx
+        return True if ctx is None else ctx.is_main_process
+
     def setup(self):
         """Setup model and tokenizer."""
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        
+
+        self._ensure_distributed()
+
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.config.model_name,
@@ -192,8 +211,13 @@ class ReasoningSFTTrainer:
                     })
                 eval_dataset = HFDataset.from_list(formatted_eval)
             
-            # Training config
-            training_args = SFTConfig(
+            # Training config — when launched under torchrun, HF Trainer wraps
+            # the model in DDP automatically using these LOCAL_RANK / backend
+            # hints; single-GPU runs ignore them.
+            ctx = self.dist_ctx
+            ddp_backend = ctx.backend if ctx and ctx.is_distributed else None
+            local_rank = ctx.local_rank if ctx and ctx.is_distributed else -1
+            training_args_kwargs = dict(
                 output_dir=self.config.output_dir,
                 num_train_epochs=self.config.num_epochs,
                 per_device_train_batch_size=self.config.batch_size,
@@ -212,7 +236,11 @@ class ReasoningSFTTrainer:
                 max_length=self.config.max_length,
                 packing=self.config.packing,
                 dataset_text_field="text",
+                ddp_find_unused_parameters=self.config.ddp_find_unused_parameters,
+                ddp_backend=ddp_backend,
+                local_rank=local_rank,
             )
+            training_args = SFTConfig(**training_args_kwargs)
             
             # Create trainer
             self.trainer = SFTTrainer(
