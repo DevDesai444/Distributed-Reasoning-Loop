@@ -195,3 +195,67 @@ legacy-to-v1 conversion path.
 The smoke artifact at `samples/synthetic_smoke/` is a tiny CPU-only set
 exercising the v1 envelope and checkpointer without invoking the LLM; do
 not treat it as a real generation run.
+
+## Distributed-Training Receipt
+
+`scripts/launch_distributed.py` runs the SFT -> DPO -> GRPO stack under
+`torchrun`. Every run writes:
+
+- `<log-dir>/rank_<RANK>.log` — per-rank init / heartbeat trace.
+- `<log-dir>/training_steps.jsonl` — per-step metrics from rank 0.
+- `<output-dir>/scaling_summary.json` — aggregated throughput per stage and,
+  when a single-GPU baseline is supplied, speedup and efficiency.
+
+The fields in `scaling_summary.json` follow the contract in
+`src/orchestration/scaling.py`:
+
+```json
+{
+  "stages": {
+    "sft": {
+      "metric": "samples_per_sec",
+      "world_size": 4.0,
+      "n_steps": 100.0,
+      "total_wall_clock_s": 0.0,
+      "tokens_per_sec": 0.0,
+      "samples_per_sec": 0.0,
+      "mean_step_ms": 0.0,
+      "p95_step_ms": 0.0,
+      "speedup": 0.0,
+      "efficiency_pct": 0.0,
+      "ideal_speedup": 4.0,
+      "single_gpu_throughput": 0.0,
+      "multi_gpu_throughput": 0.0
+    }
+  },
+  "world_size": 4,
+  "backend": "nccl",
+  "metric": "samples_per_sec",
+  "smoke": false,
+  "single_gpu_throughput": 0.0
+}
+```
+
+Interpretation rules:
+
+- `speedup = multi_gpu_throughput / single_gpu_throughput`. Both terms must be
+  in the same unit; the `metric` field carries which one.
+- `efficiency_pct = 100 * speedup / world_size`. Linear scaling is 100%.
+- `smoke: true` runs are CPU smoke artifacts, not benchmarks. The receipt
+  template explicitly distinguishes them.
+
+The filled-in human receipt lives at
+`outputs/distributed_run/TRAINING_RECEIPT.md`. The template is committed
+unfilled; an actual multi-GPU run fills the table and commits.
+
+The Ray scaling number quoted as `3.25x speedup, 81.2% efficiency` in
+`throughput_results.json` is **verification-stage** scaling produced by the
+`RayMathVerificationPool` in `src/training/grpo_trainer.py`. It is not a
+training-stage receipt and should not be conflated with one — the training
+receipt above tracks training-stage scaling separately.
+
+The CPU smoke artifact at `samples/distributed_smoke/` is produced by
+`scripts/distributed_smoke.sh` running the launcher with `--smoke`. It
+exercises the JSONL writer, the per-rank logger, and the scaling math on a
+tiny 32x32 matmul; it is not a benchmark and the numbers there speak only to
+the harness, not to training throughput.

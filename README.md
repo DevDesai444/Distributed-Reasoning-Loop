@@ -18,17 +18,21 @@ The project is built around a simple thesis:
 | HumanEval | code generation | **42.0% pass@1** |
 | MBPP | Python programming problems | **57.0% pass@1** |
 | GSM8K pass@k | math reasoning with multiple samples | **35.0% pass@1 -> 70.0% pass@8** |
-| GSM8K fine-tuning comparison | base vs GRPO-tuned model | **+20.0 pass@1 points** |
+| GSM8K fine-tuning comparison (N=20 held-out) | base vs GRPO-tuned model | **+20.0 pass@1 points** |
 
 ### Fine-Tuning Lift
 
-From `comparison_results.json`:
+From `comparison_results.json` on a **20-problem held-out GSM8K slice**. The slice
+size is small on purpose: it is the local-machine receipt the comparison file
+ships with, not a benchmark-grade evaluation. Treat it as a directional signal
+that the GRPO loop moved pass@1 upward on this slice, not as a generalization
+claim. Scaling to a larger slice is tracked in the roadmap.
 
 | Metric | Base Qwen2.5-1.5B-Instruct | Fine-Tuned `./outputs/grpo_model` | Gain |
 |---|---:|---:|---:|
-| Pass@1 | 35.0% | **55.0%** | **+20.0 pts** |
-| Pass@4 | 65.0% | **75.0%** | **+10.0 pts** |
-| Pass@8 | 80.0% | **90.0%** | **+10.0 pts** |
+| Pass@1 (N=20) | 35.0% | **55.0%** | **+20.0 pts** |
+| Pass@4 (N=20) | 65.0% | **75.0%** | **+10.0 pts** |
+| Pass@8 (N=20) | 80.0% | **90.0%** | **+10.0 pts** |
 | Correct@1 | 7 / 20 | **11 / 20** | +4 |
 
 ### Systems Benchmarks
@@ -42,7 +46,13 @@ From `throughput_results.json`:
 | No-prefix-cache throughput | 19.89 samples/sec |
 | Prefix-cache speedup | **~2.5x** |
 | Math verifier throughput | **35,526 verifications/sec** |
-| Ray scaling, 4 workers | **3.25x speedup**, 81.2% efficiency |
+| Ray **verification** scaling, 4 workers | **3.25x speedup**, 81.2% efficiency |
+
+The 3.25x / 81.2% number is **verification-stage** Ray scaling (parallel math
+checking inside `RayMathVerificationPool`). It is not a training-stage number
+and should not be quoted as one. The training-side distributed receipt is
+tracked separately in `outputs/distributed_run/TRAINING_RECEIPT.md` and is
+explicitly awaiting multi-GPU hardware.
 
 ## What It Does
 
@@ -235,8 +245,55 @@ The project treats benchmark health seriously: `valid_run: true` means the run c
 - Ray workers for verification and tokenization parallelism
 - Kafka streaming hooks for decoupled pipeline stages
 - KV-cache management for serving-oriented inference experiments
+- A scaling-efficiency utility (`scaling.py`) used by the training launcher
 
 This matters because verified reasoning gets expensive quickly: every prompt may create many candidate paths, and every path needs verification, filtering, and possibly training-time reuse.
+
+### Distributed Training
+
+`scripts/launch_distributed.py` is a torchrun-compatible launcher for the
+SFT -> DPO -> GRPO stack. The same script runs single-GPU and multi-GPU with
+no code change; the trainers detect `WORLD_SIZE > 1` from the torchrun env
+and wrap themselves in `DistributedDataParallel`.
+
+```bash
+torchrun --nproc-per-node=$NGPUS scripts/launch_distributed.py \
+    --stage all \
+    --dataset gsm8k \
+    --model Qwen/Qwen2.5-1.5B-Instruct \
+    --output-dir ./outputs/distributed_run \
+    --log-dir ./logs/distributed_run
+```
+
+Backends:
+
+- **NCCL** on CUDA hosts (the production path).
+- **Gloo** when CUDA is unavailable (the CPU smoke path so the harness is
+  exercisable on machines without a GPU).
+
+Outputs per run:
+
+- `<log-dir>/rank_*.log` — per-rank init / heartbeat traces. Useful for
+  confirming every rank joined the process group.
+- `<log-dir>/training_steps.jsonl` — per-step metrics emitted from rank 0
+  (`step`, `loss`, `lr`, `tokens_per_sec`, `samples_per_sec`, `wall_clock_s`).
+- `<output-dir>/scaling_summary.json` — aggregated throughput per stage,
+  and when `--single-gpu-throughput` is supplied, speedup and efficiency.
+
+**Status.** The launcher, the DDP-wrapped trainers (SFT/DPO via HF Trainer's
+DDP integration, GRPO via the custom `DDP(...)` wrapper in
+`grpo_trainer.py`), the scaling utility, the seed-replicated eval driver
+(`scripts/eval_replicated.py`), and a CPU smoke artifact
+(`samples/distributed_smoke/`) are all in this repo and run today. The
+multi-GPU training receipt itself
+(`outputs/distributed_run/TRAINING_RECEIPT.md`) is **awaiting hardware** —
+the environment this commit was produced in does not have multi-GPU access,
+and quoting a multi-GPU receipt without running it would be dishonest.
+
+To produce the receipt, run the launcher under torchrun on a 2-GPU or 4-GPU
+host (Kaggle 2xT4, Colab Pro+, or a lab cluster), then run
+`scripts/eval_replicated.py` against the resulting checkpoint and fill in the
+template. No code changes are required.
 
 ## Repository Map
 
