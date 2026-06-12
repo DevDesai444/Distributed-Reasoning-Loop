@@ -252,6 +252,31 @@ python main.py evaluate \
   --fail-on-errors
 ```
 
+### Three-way agreement
+
+`python main.py eval agreement ...` runs the same set of traces through the
+math/code verifier, the learned reward model, and an open-weights LLM judge
+(default Qwen2.5-7B-Instruct), then writes Cohen's kappa with 95% bootstrap
+CIs, confusion matrices per pair, and a shortcut bucket of verifier-accepted
+traces the judge flagged as bad reasoning. Difficulty bins for GSM8K use the
+`<<step>>` count in the gold solution.
+
+```bash
+python main.py eval agreement \
+  --model ./outputs/grpo_model \
+  --benchmark gsm8k \
+  --n-problems 100 \
+  --n-samples 4 \
+  --judge-model Qwen/Qwen2.5-7B-Instruct \
+  --reward-model ./outputs/reward_model \
+  --output-dir ./outputs/agreement_run
+```
+
+A pipeline-smoke artifact (`samples/agreement_smoke/agreement_smoke.json`,
+produced by `scripts/agreement_smoke.py`) shows the format. It is **not** a
+benchmark claim — it runs against five synthetic problems with a rule-based
+fake judge so the harness works on machines with no GPU and no network.
+
 Run on Kaggle T4:
 
 - Use `drlll2_training_ready.ipynb`.

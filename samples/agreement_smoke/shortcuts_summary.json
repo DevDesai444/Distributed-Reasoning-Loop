@@ -1,0 +1,11 @@
+{
+  "n_verifier_accepted": 3,
+  "n_shortcuts": 1,
+  "shortcut_rate": 0.3333333333333333,
+  "by_reason": {
+    "LUCKY_GUESS": 1
+  },
+  "by_difficulty": {
+    "low": 1
+  }
+}

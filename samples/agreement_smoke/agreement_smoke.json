@@ -1,0 +1,40 @@
+{
+  "run_id": "agreement_smoke",
+  "model": "(synthetic)",
+  "benchmark": "gsm8k-synthetic",
+  "n_problems": 5,
+  "n_traces": 5,
+  "judge_model": "stub-judge",
+  "judge_prompt_version": "MATH_RUBRIC_V1",
+  "pair_reports": [
+    {
+      "rater_a": "verifier",
+      "rater_b": "judge",
+      "n": 4,
+      "agreement": 0.75,
+      "kappa": 0.5,
+      "kappa_ci_low": 0.0,
+      "kappa_ci_high": 1.0,
+      "confusion": {
+        "tp": 2,
+        "tn": 1,
+        "fp": 0,
+        "fn": 1,
+        "n": 4,
+        "dropped_uncertain": 1
+      },
+      "per_bin": {
+        "low": {
+          "n": 5,
+          "agreement": 0.75,
+          "kappa": 0.5
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "timestamp_utc": "2026-06-12T04:36:40.579386+00:00",
+    "note": "pipeline smoke artifact \u2014 not a benchmark claim",
+    "judge_backend": "stub"
+  }
+}

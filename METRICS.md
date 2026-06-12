@@ -63,3 +63,51 @@ python main.py evaluate --model ./outputs/grpo_model --benchmark gsm8k --fail-on
 
 That makes incomplete runs exit non-zero instead of quietly looking like usable
 results.
+
+## Agreement-Run Manifest
+
+`python main.py eval agreement ...` emits an `agreement_results.json` plus a
+`run_manifest.json` describing inputs and outputs. The manifest format:
+
+```json
+{
+  "run_id": "agreement_<UTC_TIMESTAMP>",
+  "kind": "agreement",
+  "timestamp_utc": "<iso8601>",
+  "model": "<policy model id or path>",
+  "judge_model": "<judge model id>",
+  "judge_prompt_version": "MATH_RUBRIC_V1",
+  "benchmark": "gsm8k",
+  "split": "test",
+  "n_problems": 100,
+  "n_traces": 400,
+  "rm_threshold": 0.5,
+  "artifacts": [
+    "agreement_results.json",
+    "report.md",
+    "confusion_matrices/",
+    "shortcuts.jsonl",
+    "shortcuts_summary.md",
+    "shortcuts_summary.json",
+    "per_trace.jsonl"
+  ]
+}
+```
+
+Interpretation rules:
+
+- `agreement_results.json` contains one `PairReport` per evaluator pair
+  ((verifier, judge), (verifier, reward_model), (reward_model, judge) when
+  the reward model is wired). Each `PairReport` carries overall kappa with a
+  95% bootstrap CI, agreement rate, confusion-matrix counts, and per-bin
+  metrics for `low` / `mid` / `high` difficulty buckets.
+- `shortcuts.jsonl` lists verifier-accepted traces the judge rejected, keyed
+  by reason code (`INCOMPLETE_REASONING`, `WRONG_METHOD`, `LUCKY_GUESS`,
+  `MISSING_JUSTIFICATION`, `INCONSISTENT_STEPS`, `OTHER`).
+- The `judge_prompt_version` field is the contract for longitudinal
+  comparison — bump the rubric version in `src/evaluation/judges/prompts.py`
+  whenever the wording could shift verdicts, never edit a published version.
+
+The smoke artifact at `samples/agreement_smoke/agreement_smoke.json` is a
+pipeline-only sample produced from synthetic problems and a rule-based
+stub judge; do not treat it as a benchmark score.
