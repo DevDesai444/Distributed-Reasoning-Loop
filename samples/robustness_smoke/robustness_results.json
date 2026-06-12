@@ -1,0 +1,114 @@
+{
+  "run_id": "robustness_smoke",
+  "model": "smoke-stub",
+  "benchmark": "gsm8k-synthetic",
+  "n_problems": 6,
+  "n_samples_per_problem": 1,
+  "seed": 0,
+  "per_perturbation": [
+    {
+      "name": "number_swap",
+      "rewrites_label": true,
+      "n_problems_total": 6,
+      "n_applicable": 4,
+      "applicability_rate": 0.6666666666666666,
+      "matched_baseline_pass_at_1": 1.0,
+      "perturbed_pass_at_1": 0.0,
+      "retention": 0.0,
+      "retention_ci": [
+        0.0,
+        0.0
+      ],
+      "bootstrap_n": 200
+    },
+    {
+      "name": "unit_change",
+      "rewrites_label": true,
+      "n_problems_total": 6,
+      "n_applicable": 3,
+      "applicability_rate": 0.5,
+      "matched_baseline_pass_at_1": 1.0,
+      "perturbed_pass_at_1": 0.0,
+      "retention": 0.0,
+      "retention_ci": [
+        0.0,
+        0.0
+      ],
+      "bootstrap_n": 200
+    },
+    {
+      "name": "irrelevant_context",
+      "rewrites_label": false,
+      "n_problems_total": 6,
+      "n_applicable": 6,
+      "applicability_rate": 1.0,
+      "matched_baseline_pass_at_1": 1.0,
+      "perturbed_pass_at_1": 1.0,
+      "retention": 1.0,
+      "retention_ci": [
+        1.0,
+        1.0
+      ],
+      "bootstrap_n": 200
+    },
+    {
+      "name": "distractor_sentence",
+      "rewrites_label": false,
+      "n_problems_total": 6,
+      "n_applicable": 6,
+      "applicability_rate": 1.0,
+      "matched_baseline_pass_at_1": 1.0,
+      "perturbed_pass_at_1": 1.0,
+      "retention": 1.0,
+      "retention_ci": [
+        1.0,
+        1.0
+      ],
+      "bootstrap_n": 200
+    },
+    {
+      "name": "paraphrase",
+      "rewrites_label": false,
+      "n_problems_total": 6,
+      "n_applicable": 2,
+      "applicability_rate": 0.3333333333333333,
+      "matched_baseline_pass_at_1": 1.0,
+      "perturbed_pass_at_1": 0.5,
+      "retention": 0.5,
+      "retention_ci": [
+        0.0,
+        1.0
+      ],
+      "bootstrap_n": 200
+    },
+    {
+      "name": "reordering",
+      "rewrites_label": false,
+      "n_problems_total": 6,
+      "n_applicable": 4,
+      "applicability_rate": 0.6666666666666666,
+      "matched_baseline_pass_at_1": 1.0,
+      "perturbed_pass_at_1": 1.0,
+      "retention": 1.0,
+      "retention_ci": [
+        1.0,
+        1.0
+      ],
+      "bootstrap_n": 200
+    }
+  ],
+  "overall_robustness": 0.0,
+  "metadata": {
+    "timestamp_utc": "2026-06-12T04:48:54.875819+00:00",
+    "n_perturbations": 6,
+    "perturbation_names": [
+      "number_swap",
+      "unit_change",
+      "irrelevant_context",
+      "distractor_sentence",
+      "paraphrase",
+      "reordering"
+    ],
+    "note": "synthetic stub; not a benchmark"
+  }
+}

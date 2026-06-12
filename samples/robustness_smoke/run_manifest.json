@@ -1,0 +1,16 @@
+{
+  "run_id": "robustness_smoke",
+  "kind": "robustness_smoke",
+  "timestamp_utc": "2026-06-12T04:48:54.876496+00:00",
+  "model": "smoke-stub",
+  "benchmark": "gsm8k-synthetic",
+  "n_problems": 6,
+  "n_samples_per_problem": 1,
+  "seed": 0,
+  "overall_robustness": 0.0,
+  "note": "Pipeline smoke artifact, not a benchmark result.",
+  "artifacts": [
+    "robustness_results.json",
+    "report.md"
+  ]
+}

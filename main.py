@@ -208,18 +208,22 @@ def cmd_evaluate(args):
 
 
 def cmd_eval(args):
-    """Eval-suite dispatcher. Currently only `eval agreement` is wired."""
+    """Eval-suite dispatcher."""
     remaining = args.remaining
     if not remaining:
         print("usage: python main.py eval <subcommand> [...]\n"
               "  subcommands:\n"
-              "    agreement   three-way verifier/RM/judge agreement run", file=sys.stderr)
+              "    agreement   three-way verifier/RM/judge agreement run\n"
+              "    robust      perturbation-based robustness retention", file=sys.stderr)
         sys.exit(2)
     sub = remaining[0]
     rest = remaining[1:]
     if sub == "agreement":
         from scripts.agreement_eval import main as agreement_main
         raise SystemExit(agreement_main(rest))
+    if sub == "robust":
+        from scripts.robustness_eval import main as robust_main
+        raise SystemExit(robust_main(rest))
     print(f"unknown eval subcommand: {sub!r}", file=sys.stderr)
     sys.exit(2)
 
