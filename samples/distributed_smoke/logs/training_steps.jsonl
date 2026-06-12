@@ -1,0 +1,5 @@
+{"stage": "sft", "step": 0, "loss": 0.020499713718891144, "lr": 0.0, "tokens_per_sec": 6170.768892969454, "samples_per_sec": 192.83652790529544, "gpu_util": 0.0, "wall_clock_s": 0.020742958004120737}
+{"stage": "sft", "step": 1, "loss": 0.04031313583254814, "lr": 0.0, "tokens_per_sec": 693454.9317564312, "samples_per_sec": 21670.466617388476, "gpu_util": 0.0, "wall_clock_s": 0.00018458301201462746}
+{"stage": "sft", "step": 2, "loss": 0.0793210044503212, "lr": 0.0, "tokens_per_sec": 1315059.7903653004, "samples_per_sec": 41095.61844891564, "gpu_util": 0.0, "wall_clock_s": 9.73339774645865e-05}
+{"stage": "sft", "step": 3, "loss": 0.00857274979352951, "lr": 0.0, "tokens_per_sec": 1377573.8828485722, "samples_per_sec": 43049.18383901788, "gpu_util": 0.0, "wall_clock_s": 9.291697642765939e-05}
+{"stage": "sft", "step": 4, "loss": 0.023584017530083656, "lr": 0.0, "tokens_per_sec": 1333916.8306810972, "samples_per_sec": 41684.90095878429, "gpu_util": 0.0, "wall_clock_s": 9.595800656825304e-05}

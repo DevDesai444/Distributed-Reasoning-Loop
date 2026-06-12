@@ -1,0 +1,5 @@
+2026-06-12 00:58:56,613 [rank=0] INFO: Joined process group: world_size=1 backend=gloo device=cpu initialized=False
+2026-06-12 00:58:56,613 [rank=0] INFO: Starting stage=sft n_steps=5
+2026-06-12 00:58:56,635 [rank=0] INFO: Stage sft done: 5 steps, 0.0212 s wall, 942.78 samples_per_sec
+2026-06-12 00:58:56,635 [rank=0] INFO: Wrote scaling summary: /Users/DEVDESAI1/.gsd-workspaces/drl/Distributed-Reasoning-Loop/samples/distributed_smoke/outputs/scaling_summary.json
+2026-06-12 00:58:56,635 [rank=0] INFO: Rank 0 shutdown clean (log=/Users/DEVDESAI1/.gsd-workspaces/drl/Distributed-Reasoning-Loop/samples/distributed_smoke/logs/rank_0.log).
