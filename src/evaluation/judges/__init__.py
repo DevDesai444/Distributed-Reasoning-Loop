@@ -16,6 +16,7 @@ from .bias_controls import (
 )
 from .pairwise_judge import PairwiseJudge, PairwiseVerdict
 from .panel_judge import PanelConfig, PanelJudge
+from .prm_evaluator import PRMEvaluator, PRMEvaluatorConfig
 from .prompts import (
     CODE_RUBRIC_V1,
     MATH_RUBRIC_V1,
@@ -50,4 +51,6 @@ __all__ = [
     "self_preference_delta",
     "truncate_to_min_length",
     "length_bias_probe",
+    "PRMEvaluator",
+    "PRMEvaluatorConfig",
 ]

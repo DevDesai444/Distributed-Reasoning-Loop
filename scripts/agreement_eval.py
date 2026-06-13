@@ -81,6 +81,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--policy-traces", type=str, default=None,
                    help="Optional JSONL of pre-generated traces "
                         "(skips policy generation).")
+    p.add_argument("--prm-model", type=str, default=None,
+                   help="Path to a trained shortcut-PRM checkpoint. "
+                        "If supplied, adds a 4th evaluator column and the "
+                        "(verifier, prm), (judge, prm), (rm, prm) pair "
+                        "reports.")
+    p.add_argument("--prm-threshold", type=float, default=0.5,
+                   help="Shortcut probability above which the PRM REJECTs.")
     return p
 
 
@@ -372,10 +379,38 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     judge_bool: List[Optional[bool]] = [v.as_bool for v in judge_verdicts]
 
+    # ---- PRM verdicts (optional 4th evaluator) -------------------------
+    prm_verdicts: List[Optional[bool]] = []
+    prm_scores: List[Optional[float]] = []
+    prm_judge_verdicts: List[Any] = []
+    prm_loaded = False
+    if args.prm_model:
+        try:
+            from evaluation.judges import PRMEvaluator
+            prm_eval = PRMEvaluator.from_path(
+                args.prm_model, shortcut_threshold=args.prm_threshold
+            )
+            reasoning_texts = [t["reasoning"] for t in traces]
+            scores = prm_eval.score_batch(reasoning_texts)
+            prm_scores = [float(s) for s in scores]
+            prm_judge_verdicts = prm_eval.judge_verdicts(reasoning_texts)
+            prm_verdicts = [v.as_bool for v in prm_judge_verdicts]
+            prm_loaded = True
+        except Exception as exc:
+            logger.warning("could not load PRM from %s: %s — skipping PRM column", args.prm_model, exc)
+            prm_scores = [None] * len(traces)
+            prm_verdicts = [None] * len(traces)
+            prm_judge_verdicts = []
+
     # ---- per-trace artifact --------------------------------------------
     per_trace = []
-    for trace, v_verdict, r_verdict, r_score, j_verdict in zip(
-        traces, verifier_verdicts, rm_verdicts, rm_scores, judge_verdicts
+    if not prm_scores:
+        prm_scores = [None] * len(traces)
+    if not prm_verdicts:
+        prm_verdicts = [None] * len(traces)
+    for trace, v_verdict, r_verdict, r_score, j_verdict, p_score, p_verdict in zip(
+        traces, verifier_verdicts, rm_verdicts, rm_scores, judge_verdicts,
+        prm_scores, prm_verdicts,
     ):
         per_trace.append({
             "problem_id": trace["problem_id"],
@@ -386,6 +421,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             "rm_score": r_score,
             "rm_verdict": r_verdict,
             "judge": j_verdict.to_dict(),
+            "prm_score": p_score,
+            "prm_verdict": p_verdict,
         })
     with open(out_dir / "per_trace.jsonl", "w") as fh:
         for row in per_trace:
@@ -417,6 +454,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             rm_verdicts, judge_bool,
             bins=indices_by_bin, n_bootstrap=args.n_bootstrap,
         ))
+    if prm_loaded and any(v is not None for v in prm_verdicts):
+        pair_reports.append(build_pair_report(
+            "verifier", "prm",
+            verifier_verdicts, prm_verdicts,
+            bins=indices_by_bin, n_bootstrap=args.n_bootstrap,
+        ))
+        pair_reports.append(build_pair_report(
+            "judge", "prm",
+            judge_bool, prm_verdicts,
+            bins=indices_by_bin, n_bootstrap=args.n_bootstrap,
+        ))
+        if any(v is not None for v in rm_verdicts):
+            pair_reports.append(build_pair_report(
+                "reward_model", "prm",
+                rm_verdicts, prm_verdicts,
+                bins=indices_by_bin, n_bootstrap=args.n_bootstrap,
+            ))
 
     judge_prompt_version = judge_verdicts[0].prompt_version if judge_verdicts else ""
     report = AgreementReport(
@@ -434,6 +488,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             "n_samples": args.n_samples,
             "judge_backend": args.judge_backend,
             "rm_threshold": rm_threshold,
+            "prm_model": args.prm_model,
+            "prm_threshold": args.prm_threshold if prm_loaded else None,
             "policy_max_new_tokens": args.max_new_tokens,
             "policy_temperature": args.temperature,
             "seed": args.seed,
@@ -481,6 +537,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "n_problems": len(problems),
         "n_traces": len(traces),
         "rm_threshold": rm_threshold,
+        "prm_model": args.prm_model,
+        "prm_threshold": args.prm_threshold if prm_loaded else None,
         "artifacts": [
             "agreement_results.json",
             "report.md",
