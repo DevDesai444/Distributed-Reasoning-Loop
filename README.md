@@ -425,6 +425,38 @@ A pipeline-smoke artifact (`samples/robustness_smoke/`, produced by
 `scripts/robustness_smoke.py`) exercises the same path with hand-written
 predictions against six inline problems. It is **not** a benchmark claim.
 
+### Contamination
+
+`python main.py eval contamination ...` reports 13-gram overlap between
+benchmark splits and, optionally, between external corpora and the test set.
+We can't audit Qwen2.5's pretraining data — it isn't public — but we can
+quantify what *our* training inputs share with our eval inputs.
+
+```bash
+python main.py eval contamination \
+  --benchmark gsm8k \
+  --synthetic-pairs data/dpo_pairs.jsonl \
+  --output-dir ./eval_receipts/contamination/gsm8k_v1
+```
+
+The committed receipt at `eval_receipts/contamination/gsm8k_v1/` reports the
+following on the full GSM8K splits:
+
+| Direction | Haystack | Needles | Any overlap | High overlap (>=3 13-grams) |
+|---|---:|---:|---:|---:|
+| test in train | 7473 | 1319 | 3 (0.23%) | 3 (0.23%) |
+| train in test | 1319 | 7473 | 4 (0.05%) | 4 (0.05%) |
+| test in synthetic pairs | 1688 | 1319 | 0 (0.00%) | 0 (0.00%) |
+
+Three GSM8K test problems share at least three 13-grams with the train split.
+The worst offender (`gsm8k_test_632`, the "stamps at the post office" problem)
+is a near-template-duplicate of `gsm8k_train_20`: same setup, same sentence
+structure, only the character names and numbers change. The contamination rate
+is low enough that it does not meaningfully inflate test scores, but the
+absolute number is non-zero and we report it rather than round to zero. The
+synthetic pairs we generate from train show no 13-gram overlap with test, so
+the generator is not leaking test problems into training data.
+
 Run on Kaggle T4:
 
 - Use `drlll2_training_ready.ipynb`.

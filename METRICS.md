@@ -153,6 +153,64 @@ The smoke artifact at `samples/robustness_smoke/` is a pipeline-only sample
 produced with a deterministic stub generator; do not treat it as a benchmark
 score.
 
+## Contamination-Run Manifest
+
+`python main.py eval contamination ...` emits `contamination_report.json` and
+a human-readable `report.md`. The JSON payload:
+
+```json
+{
+  "schema_version": "contamination/v1",
+  "generated_at": "<iso8601>",
+  "meta": {
+    "benchmark": "gsm8k",
+    "data_source": "loader",
+    "n": 13,
+    "high_threshold": 3,
+    "notes": null
+  },
+  "reports": [
+    {
+      "haystack_name": "gsm8k/train",
+      "needle_name": "gsm8k/test",
+      "n": 13,
+      "high_threshold": 3,
+      "haystack_total_problems": 7473,
+      "needle_total_problems": 1319,
+      "needle_problems_with_any_overlap": 3,
+      "needle_problems_with_high_overlap": 3,
+      "overlap_rate_any": 0.0023,
+      "overlap_rate_high": 0.0023,
+      "top_matches": [
+        {
+          "needle_id": "gsm8k_test_632",
+          "needle_text": "<full problem text>",
+          "overlap_count": 13,
+          "overlapping_ngrams": [["bought", "stamps", "..."]]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Interpretation rules:
+
+- One `reports[]` entry per pass: train-vs-test, test-vs-train, and any
+  external/synthetic-pairs passes the user requested.
+- `overlap_rate_any` is the fraction of needle documents that share at least
+  one n-gram with the haystack. `overlap_rate_high` raises the bar to
+  `high_threshold` matches (default 3). Use the high-overlap number when
+  quoting contamination percentages — any-overlap is noisy on long benchmarks
+  because incidental phrases ("how many in total") trip a 13-gram once.
+- `data_source` is `loader` when the report came from the canonical dataset
+  loader and `sample-fallback` when the run used the bundled sample corpus at
+  `data/contamination_sample_corpus.jsonl` (set automatically when the loader
+  cannot reach the network). A fallback run is marked with a note in
+  `meta.notes` and should not be quoted as the canonical number.
+- The committed receipt under `eval_receipts/contamination/gsm8k_v1/` is the
+  canonical run on the full GSM8K splits.
+
 ## Synthetic-Run Manifest
 
 The synthetic data pipeline writes a `stats.json` per run in the output
