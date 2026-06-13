@@ -37,9 +37,13 @@ def cmd_generate(args):
 
 
 def cmd_train(args):
-    """Train model with DPO."""
+    """Train model with DPO, or dispatch to a sub-trainer."""
+    remaining = list(args.remaining)
+    if remaining and remaining[0] == "shortcut-prm":
+        from scripts.shortcut_prm_cli import main as shortcut_main
+        raise SystemExit(shortcut_main(remaining[1:]))
     from scripts.train_dpo import main as train_main
-    sys.argv = ['train_dpo.py'] + args.remaining
+    sys.argv = ['train_dpo.py'] + remaining
     train_main()
 
 
