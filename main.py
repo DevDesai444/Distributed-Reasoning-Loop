@@ -213,8 +213,9 @@ def cmd_eval(args):
     if not remaining:
         print("usage: python main.py eval <subcommand> [...]\n"
               "  subcommands:\n"
-              "    agreement   three-way verifier/RM/judge agreement run\n"
-              "    robust      perturbation-based robustness retention", file=sys.stderr)
+              "    agreement       three-way verifier/RM/judge agreement run\n"
+              "    robust          perturbation-based robustness retention\n"
+              "    contamination   n-gram overlap report between benchmark splits", file=sys.stderr)
         sys.exit(2)
     sub = remaining[0]
     rest = remaining[1:]
@@ -224,6 +225,9 @@ def cmd_eval(args):
     if sub == "robust":
         from scripts.robustness_eval import main as robust_main
         raise SystemExit(robust_main(rest))
+    if sub == "contamination":
+        from scripts.contamination_eval import main as contamination_main
+        raise SystemExit(contamination_main(rest))
     print(f"unknown eval subcommand: {sub!r}", file=sys.stderr)
     sys.exit(2)
 
