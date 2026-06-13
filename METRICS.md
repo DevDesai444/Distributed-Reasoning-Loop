@@ -100,7 +100,14 @@ Interpretation rules:
   ((verifier, judge), (verifier, reward_model), (reward_model, judge) when
   the reward model is wired). Each `PairReport` carries overall kappa with a
   95% bootstrap CI, agreement rate, confusion-matrix counts, and per-bin
-  metrics for `low` / `mid` / `high` difficulty buckets.
+  metrics. Bin names depend on the benchmark:
+
+  | Benchmark | Verifier | Difficulty bins | Rubric version |
+  |---|---|---|---|
+  | `gsm8k` | numeric equivalence (`GSM8KVerifier`) | `low` / `mid` / `high` from `<<step>>` count | `MATH_RUBRIC_V1` |
+  | `math` | symbolic equivalence (`MathVerifier`) | `level_1` ... `level_5` from MATH `level`; `level_unknown` for unparsable rows | `MATH_RUBRIC_V1` |
+  | `humaneval` | sandbox execution (`ExecutionVerifier`) with `CodeVerifier` subprocess fallback | uniform single bucket `all` | `CODE_RUBRIC_V1` |
+  The per-benchmark wiring lives behind `evaluation.agreement.benchmark_config.benchmark_config()` so adding another benchmark is one entry, not a CLI fork.
 - `shortcuts.jsonl` lists verifier-accepted traces the judge rejected, keyed
   by reason code (`INCOMPLETE_REASONING`, `WRONG_METHOD`, `LUCKY_GUESS`,
   `MISSING_JUSTIFICATION`, `INCONSISTENT_STEPS`, `OTHER`).

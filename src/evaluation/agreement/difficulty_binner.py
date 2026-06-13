@@ -58,3 +58,32 @@ def bin_for_problem(problem) -> str:
     meta = getattr(problem, "metadata", None) or {}
     solution = meta.get("full_solution") or meta.get("solution")
     return bin_for_step_count(step_count_from_solution(solution))
+
+
+UNIFORM_BIN = "all"
+
+
+def uniform_bin(_problem) -> str:
+    """Always returns the same bucket label. Used when no meaningful
+    difficulty signal exists for the benchmark (e.g. HumanEval)."""
+    return UNIFORM_BIN
+
+
+def uniform_bin_problems(problems: Iterable) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {UNIFORM_BIN: []}
+    for problem in problems:
+        out[UNIFORM_BIN].append(problem.id)
+    return out
+
+
+class UniformBinner:
+    """Single-bucket binner. Mirrors the difficulty-binner interface
+    so the agreement runner can swap it in without further branching."""
+
+    bins = (UNIFORM_BIN,)
+
+    def bin_for_problem(self, problem) -> str:
+        return UNIFORM_BIN
+
+    def bin_problems(self, problems: Iterable) -> Dict[str, List[str]]:
+        return uniform_bin_problems(problems)

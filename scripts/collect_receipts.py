@@ -105,88 +105,80 @@ def _run_synthetic_smoke(output_dir: Path) -> Tuple[Path, float]:
     return artifact_dir, time.time() - t0
 
 
-def _run_agreement_smoke(output_dir: Path) -> Tuple[Path, float]:
-    """Run the agreement-smoke pipeline into our own directory. The smoke
-    script hard-codes `samples/agreement_smoke/` so we redirect by
-    monkey-patching: simpler to just call its helpers directly here."""
-    artifact_dir = output_dir / "agreement_run"
+def _run_agreement_smoke(output_dir: Path, benchmark: str = "gsm8k") -> Tuple[Path, float]:
+    """Run the agreement smoke for one benchmark. Each benchmark writes
+    into its own artifact directory so a single ``--stage all`` sweep
+    can produce side-by-side receipts for GSM8K, MATH, and HumanEval."""
+    artifact_dir = output_dir / f"agreement_run_{benchmark}"
     if artifact_dir.exists():
         shutil.rmtree(artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
 
-    # Re-use the smoke-script primitives but write into artifact_dir.
     from data_generator.dataset_loader import Problem  # type: ignore
-    from evaluation.agreement import (
-        AgreementReport,
-        bin_for_problem,
-        build_pair_report,
-    )
+    from evaluation.agreement import AgreementReport, build_pair_report
+    from evaluation.agreement.benchmark_config import benchmark_config, empty_bins_for
     from evaluation.judges import JudgeConfig, SingleModelJudge
     from evaluation.shortcut_detector import detect_shortcuts, write_shortcuts_jsonl
-    from verifier import GSM8KVerifier  # type: ignore
-    from scripts.agreement_smoke import (
-        SYNTH_PROBLEMS,
-        SYNTH_TRACES,
-        _stub_judge_fn,
-    )
+    from scripts.agreement_eval import _humaneval_verdict
+    from scripts.agreement_smoke import _stub_judge_fn
 
-    problems = [
-        Problem(
-            id=p["id"],
-            problem=p["problem"],
-            answer=p["answer"],
-            metadata={"full_solution": p["full_solution"]},
-        )
-        for p in SYNTH_PROBLEMS
-    ]
+    cfg = benchmark_config(benchmark)
+    problems, traces = _smoke_fixtures_for(benchmark)
     problems_by_id = {p.id: p for p in problems}
 
-    verifier = GSM8KVerifier()
+    verifier = cfg.verifier_factory()
     verifier_verdicts: List[Optional[bool]] = []
-    for trace in SYNTH_TRACES:
+    for trace in traces:
         problem = problems_by_id[trace["problem_id"]]
-        r = verifier.verify_reasoning_path(trace["reasoning"], problem.answer)
-        if r.status.value == "correct":
-            verifier_verdicts.append(True)
-        elif r.status.value == "incorrect":
-            verifier_verdicts.append(False)
-        else:
+        try:
+            if benchmark == "humaneval":
+                verifier_verdicts.append(_humaneval_verdict(verifier, trace, problem))
+                continue
+            r = verifier.verify_reasoning_path(trace["reasoning"], problem.answer)
+            if r.status.value == "correct":
+                verifier_verdicts.append(True)
+            elif r.status.value == "incorrect":
+                verifier_verdicts.append(False)
+            else:
+                verifier_verdicts.append(None)
+        except Exception:
             verifier_verdicts.append(None)
 
     judge = SingleModelJudge(JudgeConfig(model_name="stub-judge", backend="stub"))
     judge.set_stub(_stub_judge_fn)
-
     judge_verdicts = []
-    for trace in SYNTH_TRACES:
+    for trace in traces:
         problem = problems_by_id[trace["problem_id"]]
         judge_verdicts.append(judge.judge(
             problem=problem.problem,
             response=trace["reasoning"],
             reference_answer=problem.answer,
-            problem_type="math",
+            problem_type=cfg.problem_type,
         ))
     judge_bool: List[Optional[bool]] = [v.as_bool for v in judge_verdicts]
 
-    pid_to_bucket = {p.id: bin_for_problem(p) for p in problems}
-    indices_by_bin: Dict[str, List[int]] = {"low": [], "mid": [], "high": []}
-    for i, trace in enumerate(SYNTH_TRACES):
-        indices_by_bin[pid_to_bucket.get(trace["problem_id"], "low")].append(i)
+    pid_to_bucket = {p.id: cfg.bin_for_problem(p) for p in problems}
+    indices_by_bin: Dict[str, List[int]] = empty_bins_for(benchmark)
+    default_bucket = cfg.bin_names[0]
+    for i, trace in enumerate(traces):
+        bucket = pid_to_bucket.get(trace["problem_id"], default_bucket)
+        indices_by_bin.setdefault(bucket, []).append(i)
 
     pair_reports = [
         build_pair_report(
             "verifier", "judge",
             verifier_verdicts, judge_bool,
-            bins=indices_by_bin, n_bootstrap=200,
+            bins=indices_by_bin, n_bootstrap=100,
         ),
     ]
 
     report = AgreementReport(
-        run_id=_now_run_id("agreement"),
+        run_id=_now_run_id(f"agreement_{benchmark}"),
         model="(synthetic)",
-        benchmark="gsm8k-synthetic",
+        benchmark=f"{benchmark}-synthetic",
         n_problems=len(problems),
-        n_traces=len(SYNTH_TRACES),
+        n_traces=len(traces),
         judge_model="stub-judge",
         judge_prompt_version=judge_verdicts[0].prompt_version,
         pair_reports=pair_reports,
@@ -194,6 +186,7 @@ def _run_agreement_smoke(output_dir: Path) -> Tuple[Path, float]:
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "judge_backend": "stub",
             "split": "synthetic",
+            "benchmark": benchmark,
             "note": "collect_receipts smoke run",
         },
     )
@@ -202,9 +195,9 @@ def _run_agreement_smoke(output_dir: Path) -> Tuple[Path, float]:
     (artifact_dir / "report.md").write_text(report.render_markdown())
 
     records, summary = detect_shortcuts(
-        problem_ids=[t["problem_id"] for t in SYNTH_TRACES],
-        problems=[problems_by_id[t["problem_id"]].problem for t in SYNTH_TRACES],
-        responses=[t["reasoning"] for t in SYNTH_TRACES],
+        problem_ids=[t["problem_id"] for t in traces],
+        problems=[problems_by_id[t["problem_id"]].problem for t in traces],
+        responses=[t["reasoning"] for t in traces],
         verifier_verdicts=verifier_verdicts,
         judge_verdicts=judge_verdicts,
         difficulty_bins=pid_to_bucket,
@@ -215,6 +208,96 @@ def _run_agreement_smoke(output_dir: Path) -> Tuple[Path, float]:
     )
 
     return artifact_dir, time.time() - t0
+
+
+def _smoke_fixtures_for(benchmark: str):
+    """Return (problems, traces) fixtures suitable for the benchmark's
+    verifier. Math/GSM8K reuse the existing GSM8K-style fixtures; MATH
+    adds a ``level`` field so the new binner has something to chew on;
+    HumanEval ships two tiny Python tasks with canonical and broken
+    completions."""
+    from data_generator.dataset_loader import Problem  # type: ignore
+    from scripts.agreement_smoke import SYNTH_PROBLEMS, SYNTH_TRACES
+
+    if benchmark == "gsm8k":
+        problems = [
+            Problem(
+                id=p["id"],
+                problem=p["problem"],
+                answer=p["answer"],
+                metadata={"full_solution": p["full_solution"]},
+            )
+            for p in SYNTH_PROBLEMS
+        ]
+        return problems, SYNTH_TRACES
+
+    if benchmark == "math":
+        # Re-skin the GSM8K fixtures with a synthetic MATH `level`. This
+        # keeps the verifier shape (final-answer match) identical while
+        # exercising the new MATH difficulty binner.
+        levels = ["Level 1", "Level 2", "Level 3", "Level 4", "Level 5"]
+        problems = []
+        for idx, p in enumerate(SYNTH_PROBLEMS):
+            problems.append(Problem(
+                id=p["id"],
+                problem=p["problem"],
+                answer=p["answer"],
+                metadata={
+                    "full_solution": p["full_solution"],
+                    "level": levels[idx % len(levels)],
+                    "type": "Algebra",
+                    "dataset": "math",
+                },
+            ))
+        return problems, SYNTH_TRACES
+
+    if benchmark == "humaneval":
+        problems = [
+            Problem(
+                id="he_smoke_1",
+                problem="def add(a, b):\n    \"\"\"Return a + b.\"\"\"\n",
+                answer="    return a + b\n",
+                metadata={
+                    "entry_point": "add",
+                    "test": (
+                        "def check(candidate):\n"
+                        "    assert candidate(1, 2) == 3\n"
+                        "    assert candidate(-1, 1) == 0\n"
+                    ),
+                    "dataset": "humaneval",
+                },
+            ),
+            Problem(
+                id="he_smoke_2",
+                problem="def is_even(n):\n    \"\"\"Return True iff n is even.\"\"\"\n",
+                answer="    return n % 2 == 0\n",
+                metadata={
+                    "entry_point": "is_even",
+                    "test": (
+                        "def check(candidate):\n"
+                        "    assert candidate(0) is True\n"
+                        "    assert candidate(3) is False\n"
+                    ),
+                    "dataset": "humaneval",
+                },
+            ),
+        ]
+        traces = [
+            {
+                "problem_id": "he_smoke_1",
+                "reasoning": "```python\n    return a + b\n```",
+                "final_answer": None,
+            },
+            {
+                "problem_id": "he_smoke_2",
+                # Deliberately wrong: returns True for odd numbers.
+                "reasoning": "```python\n    return n % 2 != 0\n```",
+                "final_answer": None,
+            },
+        ]
+        return problems, traces
+
+    raise ValueError(f"unsupported smoke benchmark: {benchmark!r}")
 
 
 def _run_robustness_smoke(output_dir: Path) -> Tuple[Path, float]:
@@ -321,15 +404,18 @@ def _run_agreement_full(
     judge_model: str,
     n_problems: int,
     n_samples: int,
+    benchmark: str = "gsm8k",
 ) -> Tuple[Path, float]:
-    artifact_dir = output_dir / "agreement_run"
+    # Each benchmark gets its own artifact directory so a multi-benchmark
+    # Kaggle session can write three receipts side by side.
+    artifact_dir = output_dir / f"agreement_run_{benchmark}"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     _run_main([
         "eval", "agreement",
         "--model", generator_model,
         "--judge-model", judge_model,
-        "--benchmark", "gsm8k",
+        "--benchmark", benchmark,
         "--n-problems", str(n_problems),
         "--n-samples", str(n_samples),
         "--output-dir", str(artifact_dir),
@@ -396,6 +482,7 @@ def _write_agreement_receipt(
     wall_clock_seconds: float,
     hardware: Dict[str, Any],
     notes: Dict[str, Any],
+    benchmark: str = "gsm8k",
 ) -> Path:
     receipt = AgreementReceipt.from_run_artifacts(
         artifact_dir,
@@ -404,7 +491,10 @@ def _write_agreement_receipt(
         notes=notes,
     )
     receipt.validate()
-    out = receipts_dir / "agreement_v1.json"
+    # GSM8K keeps the historical filename; other benchmarks get a suffix
+    # so a single Kaggle session can produce all three side by side.
+    filename = "agreement_v1.json" if benchmark == "gsm8k" else f"agreement_v1_{benchmark}.json"
+    out = receipts_dir / filename
     receipt.to_json(out)
     return out
 
@@ -463,9 +553,10 @@ def _stage_synthetic(args, output_dir: Path, receipts_dir: Path) -> Path:
 
 def _stage_agreement(args, output_dir: Path, receipts_dir: Path) -> Path:
     hardware = _hardware_dict()
+    benchmark = getattr(args, "benchmark", "gsm8k") or "gsm8k"
     if args.mode == "smoke":
-        artifact_dir, wall = _run_agreement_smoke(output_dir)
-        notes = {"mode": "smoke", "judge_backend": "stub"}
+        artifact_dir, wall = _run_agreement_smoke(output_dir, benchmark=benchmark)
+        notes = {"mode": "smoke", "judge_backend": "stub", "benchmark": benchmark}
     else:
         artifact_dir, wall = _run_agreement_full(
             output_dir,
@@ -473,13 +564,15 @@ def _stage_agreement(args, output_dir: Path, receipts_dir: Path) -> Path:
             judge_model=args.judge_model,
             n_problems=args.n_problems,
             n_samples=args.n_samples,
+            benchmark=benchmark,
         )
-        notes = {"mode": "full"}
+        notes = {"mode": "full", "benchmark": benchmark}
     return _write_agreement_receipt(
         artifact_dir, receipts_dir,
         wall_clock_seconds=wall,
         hardware=hardware,
         notes=notes,
+        benchmark=benchmark,
     )
 
 
@@ -546,6 +639,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n-samples", type=int, default=4,
                    help="Samples per problem (agreement / robustness).")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--benchmark", type=str, default="gsm8k",
+                   choices=("gsm8k", "math", "humaneval"),
+                   help="Benchmark for the agreement stage. Robustness and "
+                        "synthetic stages are always GSM8K.")
     p.add_argument("--fail-stage", type=str, default=None,
                    choices=("synthetic", "agreement", "robustness"),
                    help=argparse.SUPPRESS)

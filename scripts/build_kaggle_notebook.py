@@ -74,12 +74,13 @@ CELL_2_SYNTHETIC = """\
 """
 
 
-CELL_3_AGREEMENT = """\
-# Cell 3: three-way agreement eval.
+CELL_3_AGREEMENT_GSM8K = """\
+# Cell 3: three-way agreement eval on GSM8K.
 # 200 GSM8K test problems x 4 samples per problem. The judge is the
 # 7B Qwen Instruct model; the policy is the 1.5B model. Expect ~1.5
 # hours: judge inference dominates.
 !python scripts/collect_receipts.py --mode full --stage agreement \\
+    --benchmark gsm8k \\
     --output-dir /kaggle/working/receipts_run \\
     --generator-model Qwen/Qwen2.5-1.5B-Instruct \\
     --judge-model Qwen/Qwen2.5-7B-Instruct \\
@@ -88,8 +89,40 @@ CELL_3_AGREEMENT = """\
 """
 
 
-CELL_4_ROBUSTNESS = """\
-# Cell 4: robustness eval against six perturbations.
+CELL_4_AGREEMENT_MATH = """\
+# Cell 4: agreement eval on MATH (competition-style symbolic problems).
+# MATH problems are longer, so we drop n_samples to 2 to keep wall-clock
+# bounded. The verifier swaps to symbolic equivalence under the hood;
+# the judge prompt stays on MATH_RUBRIC_V1 (math is math).
+!python scripts/collect_receipts.py --mode full --stage agreement \\
+    --benchmark math \\
+    --output-dir /kaggle/working/receipts_run \\
+    --generator-model Qwen/Qwen2.5-1.5B-Instruct \\
+    --judge-model Qwen/Qwen2.5-7B-Instruct \\
+    --n-problems 100 \\
+    --n-samples 2
+"""
+
+
+CELL_5_AGREEMENT_HUMANEVAL = """\
+# Cell 5: agreement eval on HumanEval (Python code).
+# The verifier path swaps to sandbox execution. If the
+# distributed-reasoning-loop-sandbox image is built locally the runner
+# picks it up; otherwise it falls back to a subprocess executor good
+# enough for smoke. Docker is NOT required for the fallback path.
+# The judge rubric switches to CODE_RUBRIC_V1.
+!python scripts/collect_receipts.py --mode full --stage agreement \\
+    --benchmark humaneval \\
+    --output-dir /kaggle/working/receipts_run \\
+    --generator-model Qwen/Qwen2.5-1.5B-Instruct \\
+    --judge-model Qwen/Qwen2.5-7B-Instruct \\
+    --n-problems 100 \\
+    --n-samples 4
+"""
+
+
+CELL_6_ROBUSTNESS = """\
+# Cell 6: robustness eval against six perturbations.
 # Same problem slice as agreement, fixed seed=0 so reruns are
 # reproducible. Expect ~1 hour: six perturbations x 200 problems x 4
 # samples each, but most run sequentially through the same model.
@@ -102,17 +135,24 @@ CELL_4_ROBUSTNESS = """\
 """
 
 
-CELL_5_VALIDATE = """\
-# Cell 5: re-read receipts already on disk and assert each one passes
-# schema validate(). No new runs. This is the gate that catches a
-# malformed receipt before download.
+CELL_7_VALIDATE_AND_COMPARE = """\
+# Cell 7: re-read receipts already on disk and assert each one passes
+# schema validate(); then build the cross-benchmark agreement table
+# from the three agreement receipts.
 !python scripts/collect_receipts.py --stage validate \\
     --output-dir /kaggle/working/receipts_run
+
+!python scripts/agreement_compare.py \\
+    --receipt /kaggle/working/receipts_run/receipts/agreement_v1.json \\
+    --receipt /kaggle/working/receipts_run/receipts/agreement_v1_math.json \\
+    --receipt /kaggle/working/receipts_run/receipts/agreement_v1_humaneval.json \\
+    --output /kaggle/working/receipts_run/eval_receipts/agreement_cross_benchmark.md
+!cat /kaggle/working/receipts_run/eval_receipts/agreement_cross_benchmark.md
 """
 
 
-CELL_6_SUMMARY = """\
-# Cell 6: human-readable summary so we can eyeball the numbers before
+CELL_8_SUMMARY = """\
+# Cell 8: human-readable summary so we can eyeball the numbers before
 # downloading.
 import json, pathlib
 receipts_dir = pathlib.Path("/kaggle/working/receipts_run/receipts")
@@ -126,6 +166,7 @@ for p in sorted(receipts_dir.glob("*.json")):
         print(f"  verifier accept rate: {s['verifier_accept_rate']:.3f}")
         print(f"  dedup ratio: {s['dedup_ratio']:.3f}")
     elif kind == "agreement":
+        print(f"  benchmark: {data['benchmark']}")
         for pair in data["pairs"]:
             kappa = pair.get("cohens_kappa")
             print(f"  {pair['pair_name']}: kappa={kappa}")
@@ -138,8 +179,9 @@ for p in sorted(receipts_dir.glob("*.json")):
             print(f"    {row['name']:24s} retention={row['retention']}")
     print(f"  wall_clock_seconds: {data['wall_clock_seconds']:.0f}")
 print()
-print("Download the three JSONs in /kaggle/working/receipts_run/receipts/")
-print("and attach them to the M2-R3 PR.")
+print("Download the JSONs in /kaggle/working/receipts_run/receipts/")
+print("plus eval_receipts/agreement_cross_benchmark.md and attach them")
+print("to the next project PR.")
 """
 
 
@@ -148,21 +190,26 @@ print("and attach them to the M2-R3 PR.")
 MARKDOWN_INTRO = """\
 # Receipt Collection Notebook
 
-This notebook drives three pipelines on a Kaggle T4 GPU and produces
-three versioned JSON receipts:
+This notebook drives the synthetic / agreement / robustness pipelines
+on a Kaggle T4 GPU and produces versioned JSON receipts plus a
+cross-benchmark agreement table:
 
 - `synthetic_v1.json` — synthetic-data scale-up summary
-- `agreement_v1.json` — three-way (verifier / RM / judge) agreement
+- `agreement_v1.json` — GSM8K three-way agreement
+- `agreement_v1_math.json` — MATH three-way agreement (symbolic verifier)
+- `agreement_v1_humaneval.json` — HumanEval three-way agreement (code execution)
 - `robustness_v1.json` — perturbation robustness retention
+- `eval_receipts/agreement_cross_benchmark.md` — side-by-side judge
+  reliability table across the three benchmarks
 
-Expected wall-clock: roughly 4-6 hours on a single T4. Each stage
+Expected wall-clock: roughly 6-8 hours on a single T4. Each stage
 writes its receipt as soon as it finishes, so if Kaggle kills the
 session mid-run, the already-completed receipts are still under
 `/kaggle/working/receipts_run/receipts/`.
 
-The notebook does not edit the repo or commit anything. After cell 6
-prints the summary, download the three JSON files from the file
-browser and attach them to the project PR.
+The notebook does not edit the repo or commit anything. After the
+summary cell prints, download the JSON files plus the cross-benchmark
+markdown from the file browser and attach them to the project PR.
 """
 
 
@@ -192,10 +239,12 @@ def build_notebook() -> nbformat.NotebookNode:
         _code(CELL_0_CLONE),
         _code(CELL_1_SETUP),
         _code(CELL_2_SYNTHETIC),
-        _code(CELL_3_AGREEMENT),
-        _code(CELL_4_ROBUSTNESS),
-        _code(CELL_5_VALIDATE),
-        _code(CELL_6_SUMMARY),
+        _code(CELL_3_AGREEMENT_GSM8K),
+        _code(CELL_4_AGREEMENT_MATH),
+        _code(CELL_5_AGREEMENT_HUMANEVAL),
+        _code(CELL_6_ROBUSTNESS),
+        _code(CELL_7_VALIDATE_AND_COMPARE),
+        _code(CELL_8_SUMMARY),
     ]
     nb["cells"] = cells
     return nb

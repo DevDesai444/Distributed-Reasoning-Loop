@@ -85,9 +85,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _benchmark_to_problem_type(benchmark: str) -> str:
-    if benchmark == "humaneval":
-        return "code"
-    return "math"
+    from evaluation.agreement.benchmark_config import benchmark_config
+    return benchmark_config(benchmark).problem_type
 
 
 def _load_problems(benchmark: str, split: str, n: int):
@@ -181,32 +180,116 @@ def _load_pregenerated(path: str) -> List[Dict[str, Any]]:
 
 
 def _verifier_for(benchmark: str):
-    from verifier import GSM8KVerifier, MathVerifier  # type: ignore
-    if benchmark == "gsm8k":
-        return GSM8KVerifier()
-    if benchmark == "math":
-        return MathVerifier()
-    if benchmark == "humaneval":
-        from verifier import HumanEvalVerifier  # type: ignore
-        return HumanEvalVerifier()
-    raise ValueError(benchmark)
+    from evaluation.agreement.benchmark_config import benchmark_config
+    return benchmark_config(benchmark).verifier_factory()
+
+
+def _extract_code_block(text: str) -> str:
+    """Pull a python block out of a free-form trace, falling back to raw text.
+
+    Leading/trailing newlines are trimmed but interior indentation is left
+    intact — HumanEval completions are usually a function body that has to
+    sit underneath an externally-defined ``def`` header.
+    """
+    import re
+
+    if not text:
+        return ""
+    fence_patterns = (
+        r"```python\n(.*?)```",
+        r"```py\n(.*?)```",
+        r"```\n(.*?)```",
+        r"```(.*?)```",
+    )
+    for pattern in fence_patterns:
+        matches = re.findall(pattern, text, re.DOTALL)
+        if matches:
+            block = matches[0]
+            return block.strip("\n").rstrip()
+    return text.strip("\n").rstrip()
+
+
+def _subprocess_humaneval_verdict(
+    problem_prompt: str,
+    code: str,
+    entry_point: str,
+    test: str,
+    timeout_s: int = 10,
+) -> Optional[bool]:
+    """Run a HumanEval-style check in a local subprocess.
+
+    This is the no-Docker fallback path used on CPU smokes and CI. It
+    runs untrusted-ish code; that's acceptable here because the smoke
+    fixtures are checked-in stubs, not third-party submissions. The
+    production path is the Docker sandbox via ``ExecutionVerifier``.
+    """
+    import subprocess
+    import sys as _sys
+
+    body = (problem_prompt or "") + "\n" + code + "\n\n" + test
+    if entry_point:
+        body += f"\n\ncheck({entry_point})\n"
+    try:
+        result = subprocess.run(
+            [_sys.executable, "-I", "-u", "-c", body],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    except Exception as exc:
+        logger.warning("subprocess humaneval fallback crashed: %s", exc)
+        return None
+    return result.returncode == 0
+
+
+def _humaneval_verdict(verifier, trace: Dict[str, Any], problem) -> Optional[bool]:
+    """Map either Docker-sandbox or subprocess code-verifier outcomes to bool."""
+    code = _extract_code_block(trace.get("reasoning") or "")
+    meta = problem.metadata or {}
+    test = meta.get("test", "")
+    entry_point = meta.get("entry_point", "")
+
+    from verifier import (  # type: ignore
+        CodeVerifier,
+        ExecutionVerificationStatus,
+        ExecutionVerifier,
+    )
+
+    # Path 1: Docker-backed sandbox executor (production path on Kaggle).
+    if isinstance(verifier, ExecutionVerifier):
+        full_program = (problem.problem or "") + "\n" + code + "\n\n" + test
+        if entry_point:
+            full_program += f"\n\ncheck({entry_point})\n"
+        result = verifier.verify(
+            prompt=problem.problem or "",
+            generated_code=full_program,
+            test_cases=None,
+        )
+        return result.status == ExecutionVerificationStatus.PASS
+
+    # Path 2: CodeVerifier wraps DockerSandbox which still needs Docker.
+    # When the daemon isn't reachable we fall back to a local subprocess
+    # so CPU smokes and CI complete without Docker.
+    if isinstance(verifier, CodeVerifier):
+        return _subprocess_humaneval_verdict(
+            problem.problem or "",
+            code,
+            entry_point,
+            test,
+        )
+
+    raise TypeError(f"Unsupported HumanEval verifier type: {type(verifier).__name__}")
 
 
 def _verifier_verdict(verifier, benchmark: str, trace: Dict[str, Any], problem) -> Optional[bool]:
     from verifier import VerificationStatus  # type: ignore
     try:
         if benchmark == "humaneval":
-            code = verifier.extract_code(trace["reasoning"])
-            from verifier import ExecutionStatus  # type: ignore
-            result = verifier.verify_problem(
-                task_id=problem.id,
-                prompt=problem.problem,
-                completion=code,
-                test=problem.metadata["test"],
-                entry_point=problem.metadata["entry_point"],
-            )
-            return result.status == ExecutionStatus.SUCCESS
-        # math-ish
+            return _humaneval_verdict(verifier, trace, problem)
+        # math-ish (gsm8k + math)
         result = verifier.verify_reasoning_path(trace["reasoning"], problem.answer)
         if result.status == VerificationStatus.CORRECT:
             return True
@@ -293,13 +376,15 @@ def _judge_verdicts(
     return verdicts, judge
 
 
-def _build_bins(problems, traces):
-    from evaluation.agreement import bin_for_problem
-    pid_to_bucket = {p.id: bin_for_problem(p) for p in problems}
-    indices_by_bin: Dict[str, List[int]] = {"low": [], "mid": [], "high": []}
+def _build_bins(benchmark: str, problems, traces):
+    from evaluation.agreement.benchmark_config import benchmark_config, empty_bins_for
+    cfg = benchmark_config(benchmark)
+    pid_to_bucket = {p.id: cfg.bin_for_problem(p) for p in problems}
+    indices_by_bin: Dict[str, List[int]] = empty_bins_for(benchmark)
+    default_bucket = cfg.bin_names[0]
     for i, trace in enumerate(traces):
-        bucket = pid_to_bucket.get(trace["problem_id"], "low")
-        indices_by_bin[bucket].append(i)
+        bucket = pid_to_bucket.get(trace["problem_id"], default_bucket)
+        indices_by_bin.setdefault(bucket, []).append(i)
     return pid_to_bucket, indices_by_bin
 
 
@@ -398,7 +483,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         confusion_matrix,
     )
 
-    _, indices_by_bin = _build_bins(problems, traces)
+    _, indices_by_bin = _build_bins(args.benchmark, problems, traces)
 
     pair_reports = []
     pair_reports.append(build_pair_report(
@@ -452,7 +537,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # ---- shortcut detection --------------------------------------------
     from evaluation.shortcut_detector import detect_shortcuts, write_shortcuts_jsonl
-    pid_to_bucket = {p.id: __import__("evaluation.agreement", fromlist=["bin_for_problem"]).bin_for_problem(p) for p in problems}
+    from evaluation.agreement.benchmark_config import benchmark_config as _bc
+    _bin_fn = _bc(args.benchmark).bin_for_problem
+    pid_to_bucket = {p.id: _bin_fn(p) for p in problems}
     records, summary = detect_shortcuts(
         problem_ids=[t["problem_id"] for t in traces],
         problems=[problems_by_id[t["problem_id"]].problem for t in traces],
