@@ -415,8 +415,15 @@ python main.py evaluate \
 math/code verifier, the learned reward model, and an open-weights LLM judge
 (default Qwen2.5-7B-Instruct), then writes Cohen's kappa with 95% bootstrap
 CIs, confusion matrices per pair, and a shortcut bucket of verifier-accepted
-traces the judge flagged as bad reasoning. Difficulty bins for GSM8K use the
-`<<step>>` count in the gold solution.
+traces the judge flagged as bad reasoning. The same pipeline supports three
+benchmarks; the verifier and difficulty binner swap per benchmark, the judge
+rubric switches between `MATH_RUBRIC_V1` and `CODE_RUBRIC_V1`:
+
+| Benchmark | Verifier | Difficulty bins | Rubric |
+|---|---|---|---|
+| `gsm8k` | numeric equivalence | `low` / `mid` / `high` from `<<step>>` count | `MATH_RUBRIC_V1` |
+| `math` | symbolic equivalence | `level_1` ... `level_5` from MATH `level` field | `MATH_RUBRIC_V1` |
+| `humaneval` | sandbox execution (Docker) with subprocess fallback | uniform single bucket (`all`) | `CODE_RUBRIC_V1` |
 
 ```bash
 python main.py eval agreement \
@@ -427,7 +434,29 @@ python main.py eval agreement \
   --judge-model Qwen/Qwen2.5-7B-Instruct \
   --reward-model ./outputs/reward_model \
   --output-dir ./outputs/agreement_run
+
+# MATH — symbolic equivalence path
+python main.py eval agreement --benchmark math \
+  --model ./outputs/grpo_model \
+  --n-problems 100 --n-samples 2 \
+  --output-dir ./outputs/agreement_math
+
+# HumanEval — code-execution path
+python main.py eval agreement --benchmark humaneval \
+  --model ./outputs/grpo_model \
+  --n-problems 100 --n-samples 4 \
+  --output-dir ./outputs/agreement_humaneval
 ```
+
+The HumanEval path prefers the Docker-backed sandbox when the
+`distributed-reasoning-loop-sandbox` image is available locally; if it
+isn't, the runner falls back to a subprocess-based code executor so the
+CPU smoke (and CI) work without Docker.
+
+Once a Kaggle run lands, `scripts/agreement_compare.py` joins ≥2 receipts
+into `eval_receipts/agreement_cross_benchmark.md`, a single side-by-side
+table of judge reliability per benchmark. That table is the headline
+artifact for this subsection in the next numbers PR.
 
 A pipeline-smoke artifact (`samples/agreement_smoke/agreement_smoke.json`,
 produced by `scripts/agreement_smoke.py`) shows the format. It is **not** a
