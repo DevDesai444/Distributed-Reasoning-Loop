@@ -238,6 +238,48 @@ Recent Kaggle/T4 support includes explicit `4bit` quantized LoRA loading and CUD
 
 The project treats benchmark health seriously: `valid_run: true` means the run completed with `errors == 0`; partial or failed runs are not quoted as scores.
 
+#### Running real receipts
+
+`notebooks/kaggle_receipts.ipynb` drives the synthetic / agreement /
+robustness pipelines end-to-end on a single Kaggle T4 and emits three
+versioned JSONs:
+
+- `receipts/synthetic_v1.json` — synthetic-data scale-up stats (target
+  30k unique DPO pairs)
+- `receipts/agreement_v1.json` — three-way verifier / RM / judge
+  agreement on 200 GSM8K problems x 4 samples
+- `receipts/robustness_v1.json` — perturbation retention across six
+  perturbations on the same 200 x 4 slice
+
+Hardware: Kaggle free-tier T4 (16 GB) is sufficient. Expected
+wall-clock is roughly 4-6 hours; each cell writes its receipt as soon
+as it finishes, so an interrupted session keeps whatever has already
+completed.
+
+The notebook itself is rendered from `scripts/build_kaggle_notebook.py`
+so review diffs are readable. To regenerate it after editing the
+source script:
+
+```bash
+python scripts/build_kaggle_notebook.py
+```
+
+For CPU-only validation (no GPU, no network, no model weights) the
+same orchestration is exercised by:
+
+```bash
+python scripts/collect_receipts.py --mode smoke --stage all \
+    --output-dir /tmp/receipts_smoke
+```
+
+This produces the three receipts under `/tmp/receipts_smoke/receipts/`
+in under 10 seconds using stub generators and a rule-based stub judge.
+It is what runs in the test suite and what guards the schemas from
+silent drift.
+
+Until the real run lands, any numbers tagged N=200 in this README are
+placeholders awaiting Phase R2 hardware execution.
+
 ### Distributed Systems Layer
 
 `src/orchestration/` includes:
