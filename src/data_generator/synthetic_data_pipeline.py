@@ -5,8 +5,9 @@ Creates positive/negative pairs for RL training.
 
 import json
 import logging
+import statistics
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Iterable
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
@@ -15,6 +16,14 @@ import hashlib
 
 from .cot_generator import CoTGenerator, ReasoningPath, GenerationConfig
 from .dataset_loader import DatasetLoader, Problem, get_loader
+from .provenance import (
+    PROVENANCE_SCHEMA_VERSION,
+    ProvenanceMetadata,
+    build_provenance,
+)
+from .quality_score import score_trace
+from .stats import RunStats
+from .checkpoint import PairCheckpointer
 
 # Import verifiers - handle both package and direct import
 import sys
@@ -529,6 +538,174 @@ class SyntheticDataPipeline:
                 f.write(json.dumps(sample.to_dict()) + "\n")
         
         logger.info(f"Results saved to {self.output_dir}")
+
+
+    # ------------------------------------------------------------------
+    # v1 (provenance) emission path
+    # ------------------------------------------------------------------
+
+    def _backend_name(self) -> str:
+        backend = getattr(self.generator_config, "backend", None)
+        if backend is None:
+            return "unknown"
+        return getattr(backend, "value", str(backend))
+
+    def _verifier_version(self) -> str:
+        return getattr(self.verifier, "VERSION", "v1")
+
+    def _source_split(self) -> str:
+        return getattr(self.dataset_loader, "split", "unknown") or "unknown"
+
+    def build_v1_record(
+        self,
+        *,
+        problem: Problem,
+        chosen: FilteredSample,
+        rejected: FilteredSample,
+        median_length: int,
+    ) -> Dict[str, Any]:
+        """Construct a v1 pair record with provenance + quality score."""
+        chosen_score = score_trace(
+            chosen.reasoning,
+            is_correct=chosen.is_correct,
+            median_length=median_length,
+        )
+        provenance = build_provenance(
+            problem_id=problem.id,
+            chosen_text=chosen.reasoning,
+            rejected_text=rejected.reasoning,
+            source_dataset=self.dataset_name,
+            source_split=self._source_split(),
+            generator_backend=self._backend_name(),
+            generator_model=self.generator_config.model_name,
+            generation_temperature=self.generator_config.temperature,
+            generation_seed=getattr(self.generator_config, "seed", None),
+            verifier_verdict_chosen="accept" if chosen.is_correct else "reject",
+            verifier_verdict_rejected="accept" if rejected.is_correct else "reject",
+            verifier_version=self._verifier_version(),
+            quality_score=chosen_score,
+        )
+        pair_block = {
+            "problem_id": problem.id,
+            "problem": problem.problem,
+            "prompt": problem.problem,
+            "chosen": chosen.reasoning,
+            "rejected": rejected.reasoning,
+            "chosen_answer": chosen.final_answer,
+            "rejected_answer": rejected.final_answer,
+            "expected_answer": problem.answer,
+        }
+        return {
+            "pair": pair_block,
+            "provenance": provenance.to_dict(),
+            "quality_score": chosen_score,
+        }
+
+    def run_with_provenance(
+        self,
+        *,
+        subset_size: Optional[int] = None,
+        target_pairs: Optional[int] = None,
+        max_pairs_per_problem: int = 8,
+        resume: bool = True,
+        checkpoint_dir: Optional[Path] = None,
+        shard_size: int = 1000,
+    ) -> Dict[str, Any]:
+        """End-to-end run that emits v1 (provenance-tagged) pair records.
+
+        This is the new code path. It reuses the existing generator and
+        verifier but wraps emission in a resumable checkpointer and a
+        stats aggregator.
+
+        Returns a dict with keys: `stats`, `output_dir`, `checkpoint_dir`.
+        """
+        problems = self.dataset_loader.load()
+        if subset_size:
+            problems = problems[:subset_size]
+        self._save_problem_manifest(problems)
+
+        ckpt_dir = Path(checkpoint_dir) if checkpoint_dir else self.output_dir / "checkpoints"
+        checkpointer = PairCheckpointer(ckpt_dir, shard_size=shard_size)
+        if resume:
+            checkpointer.restore()
+        seen_problem_ids = set(checkpointer.state.seen_problem_ids)
+
+        run_stats = RunStats()
+
+        self.generator.initialize()
+
+        # We need a median length to score traces; bootstrap from the first
+        # batch we see and update lazily. For tiny smoke runs the median is
+        # taken across whatever we have at the time of pair construction.
+        lengths: List[int] = []
+
+        for problem in tqdm(problems, desc="Provenance run"):
+            if target_pairs is not None and checkpointer.state.total_pairs >= target_pairs:
+                break
+            if problem.id in seen_problem_ids:
+                continue
+            run_stats.record_problem_attempt()
+
+            samples = self.generate_for_problem(problem)
+            for s in samples:
+                lengths.append(len(s.reasoning))
+                run_stats.record_generation(
+                    backend=self._backend_name(),
+                    accepted=s.is_correct,
+                )
+
+            correct = [s for s in samples if s.is_correct]
+            incorrect = [s for s in samples if not s.is_correct]
+            if not correct or not incorrect:
+                continue
+
+            median_length = int(statistics.median(lengths)) if lengths else 0
+
+            # Cap combinatorial blow-up per problem.
+            emitted_for_problem = 0
+            for chosen in correct:
+                if emitted_for_problem >= max_pairs_per_problem:
+                    break
+                for rejected in incorrect:
+                    if emitted_for_problem >= max_pairs_per_problem:
+                        break
+                    record = self.build_v1_record(
+                        problem=problem,
+                        chosen=chosen,
+                        rejected=rejected,
+                        median_length=median_length,
+                    )
+                    run_stats.record_pair_candidate()
+                    accepted = checkpointer.add(record)
+                    if accepted:
+                        run_stats.record_unique_pair(record.get("quality_score"))
+                        emitted_for_problem += 1
+                        if target_pairs is not None and checkpointer.state.total_pairs >= target_pairs:
+                            break
+
+        checkpointer.flush()
+
+        # Materialize a flat artifact too for downstream consumers.
+        pairs_path = self.output_dir / "dpo_pairs_v1.jsonl"
+        with open(pairs_path, "w", encoding="utf-8") as fh:
+            for record in checkpointer.iter_all():
+                fh.write(json.dumps(record) + "\n")
+
+        stats_path = self.output_dir / "stats.json"
+        run_stats.write(stats_path)
+
+        logger.info(
+            "v1 run complete: %d unique pairs, %d candidates, stats at %s",
+            checkpointer.state.total_pairs,
+            run_stats.pair_candidates,
+            stats_path,
+        )
+        return {
+            "stats": run_stats.to_dict(),
+            "output_dir": str(self.output_dir),
+            "checkpoint_dir": str(ckpt_dir),
+            "pairs_path": str(pairs_path),
+        }
 
 
 def create_pipeline_from_config(config: Dict[str, Any]) -> SyntheticDataPipeline:

@@ -18,17 +18,21 @@ The project is built around a simple thesis:
 | HumanEval | code generation | **42.0% pass@1** |
 | MBPP | Python programming problems | **57.0% pass@1** |
 | GSM8K pass@k | math reasoning with multiple samples | **35.0% pass@1 -> 70.0% pass@8** |
-| GSM8K fine-tuning comparison | base vs GRPO-tuned model | **+20.0 pass@1 points** |
+| GSM8K fine-tuning comparison (N=20 held-out) | base vs GRPO-tuned model | **+20.0 pass@1 points** |
 
 ### Fine-Tuning Lift
 
-From `comparison_results.json`:
+From `comparison_results.json` on a **20-problem held-out GSM8K slice**. The slice
+size is small on purpose: it is the local-machine receipt the comparison file
+ships with, not a benchmark-grade evaluation. Treat it as a directional signal
+that the GRPO loop moved pass@1 upward on this slice, not as a generalization
+claim. Scaling to a larger slice is tracked in the roadmap.
 
 | Metric | Base Qwen2.5-1.5B-Instruct | Fine-Tuned `./outputs/grpo_model` | Gain |
 |---|---:|---:|---:|
-| Pass@1 | 35.0% | **55.0%** | **+20.0 pts** |
-| Pass@4 | 65.0% | **75.0%** | **+10.0 pts** |
-| Pass@8 | 80.0% | **90.0%** | **+10.0 pts** |
+| Pass@1 (N=20) | 35.0% | **55.0%** | **+20.0 pts** |
+| Pass@4 (N=20) | 65.0% | **75.0%** | **+10.0 pts** |
+| Pass@8 (N=20) | 80.0% | **90.0%** | **+10.0 pts** |
 | Correct@1 | 7 / 20 | **11 / 20** | +4 |
 
 ### Systems Benchmarks
@@ -42,7 +46,13 @@ From `throughput_results.json`:
 | No-prefix-cache throughput | 19.89 samples/sec |
 | Prefix-cache speedup | **~2.5x** |
 | Math verifier throughput | **35,526 verifications/sec** |
-| Ray scaling, 4 workers | **3.25x speedup**, 81.2% efficiency |
+| Ray **verification** scaling, 4 workers | **3.25x speedup**, 81.2% efficiency |
+
+The 3.25x / 81.2% number is **verification-stage** Ray scaling (parallel math
+checking inside `RayMathVerificationPool`). It is not a training-stage number
+and should not be quoted as one. The training-side distributed receipt is
+tracked separately in `outputs/distributed_run/TRAINING_RECEIPT.md` and is
+explicitly awaiting multi-GPU hardware.
 
 ## What It Does
 
@@ -131,11 +141,69 @@ This turns model outputs into objective labels instead of relying on manual pref
 - `filtered_samples.jsonl`
 - `correct_samples.jsonl`
 - `incorrect_samples.jsonl`
-- `dpo_pairs.jsonl`
+- `dpo_pairs.jsonl` (legacy flat schema)
+- `dpo_pairs_v1.jsonl` (provenance-tagged v1 envelope)
 - `full_pairs.jsonl`
 - `stats.json`
 
 The preprocessing step filters repetitive traces, removes near duplicates, prioritizes high-confidence positives, and builds diverse correct/incorrect preference pairs.
+
+#### v1 Provenance Schema
+
+Every pair emitted by the v1 path carries a `provenance` block and a `quality_score`. The on-disk JSONL envelope is:
+
+```json
+{
+  "pair": {"problem_id": "...", "problem": "...", "prompt": "...", "chosen": "...", "rejected": "...", "expected_answer": "..."},
+  "provenance": {
+    "pair_id": "sha256(problem_id|chosen|rejected)",
+    "problem_id": "gsm8k_train_0123",
+    "source_dataset": "gsm8k",
+    "source_split": "train",
+    "generator_backend": "vllm",
+    "generator_model": "Qwen/Qwen2.5-1.5B-Instruct",
+    "generation_temperature": 0.7,
+    "generation_seed": 42,
+    "verifier_verdict_chosen": "accept",
+    "verifier_verdict_rejected": "reject",
+    "verifier_version": "v1",
+    "dedup_hash_chosen": "...",
+    "dedup_hash_rejected": "...",
+    "quality_score": 0.83,
+    "generated_at": "2026-06-12T...",
+    "schema_version": "1"
+  },
+  "quality_score": 0.83
+}
+```
+
+The quality score is the mean of three [0, 1] components: verifier verdict (1.0 / 0.0), inline `<<a op b = c>>` step coherence, and a length penalty against the running median trace length. See `src/data_generator/quality_score.py`.
+
+#### Generating at Scale
+
+```bash
+# v1 emission path (default), with checkpoint shards under outputs/synthetic_data/checkpoints/
+python main.py generate --dataset gsm8k --num-paths 12 \
+    --target-pairs 30000 --max-pairs-per-problem 8 \
+    --with-provenance --resume
+```
+
+- `--target-pairs N` — stop emitting once N unique pairs have been written.
+- `--max-pairs-per-problem K` — cap combinatorial pair-count per problem.
+- `--resume` — pick up from the latest checkpoint shard. The seen-set is rebuilt from disk so dedup stays correct across restarts.
+- `--no-provenance` — opt back into the legacy emission path.
+
+#### Migrating Legacy Pairs
+
+To rewrite an existing `data/dpo_pairs.jsonl` into the v1 envelope:
+
+```bash
+python scripts/migrate_pairs_to_v1.py data/dpo_pairs.jsonl
+```
+
+The helper is idempotent: re-running on a v1 file is a no-op, and a `.bak` copy of the original is created the first time. Legacy lines come back with `generator_backend: "legacy"` and `quality_score: null` because the original verdicts are not recoverable.
+
+A small CPU-only smoke artifact set lives under `samples/synthetic_smoke/` for exercising the envelope without invoking the LLM.
 
 ### Training Stack
 
@@ -177,8 +245,55 @@ The project treats benchmark health seriously: `valid_run: true` means the run c
 - Ray workers for verification and tokenization parallelism
 - Kafka streaming hooks for decoupled pipeline stages
 - KV-cache management for serving-oriented inference experiments
+- A scaling-efficiency utility (`scaling.py`) used by the training launcher
 
 This matters because verified reasoning gets expensive quickly: every prompt may create many candidate paths, and every path needs verification, filtering, and possibly training-time reuse.
+
+### Distributed Training
+
+`scripts/launch_distributed.py` is a torchrun-compatible launcher for the
+SFT -> DPO -> GRPO stack. The same script runs single-GPU and multi-GPU with
+no code change; the trainers detect `WORLD_SIZE > 1` from the torchrun env
+and wrap themselves in `DistributedDataParallel`.
+
+```bash
+torchrun --nproc-per-node=$NGPUS scripts/launch_distributed.py \
+    --stage all \
+    --dataset gsm8k \
+    --model Qwen/Qwen2.5-1.5B-Instruct \
+    --output-dir ./outputs/distributed_run \
+    --log-dir ./logs/distributed_run
+```
+
+Backends:
+
+- **NCCL** on CUDA hosts (the production path).
+- **Gloo** when CUDA is unavailable (the CPU smoke path so the harness is
+  exercisable on machines without a GPU).
+
+Outputs per run:
+
+- `<log-dir>/rank_*.log` — per-rank init / heartbeat traces. Useful for
+  confirming every rank joined the process group.
+- `<log-dir>/training_steps.jsonl` — per-step metrics emitted from rank 0
+  (`step`, `loss`, `lr`, `tokens_per_sec`, `samples_per_sec`, `wall_clock_s`).
+- `<output-dir>/scaling_summary.json` — aggregated throughput per stage,
+  and when `--single-gpu-throughput` is supplied, speedup and efficiency.
+
+**Status.** The launcher, the DDP-wrapped trainers (SFT/DPO via HF Trainer's
+DDP integration, GRPO via the custom `DDP(...)` wrapper in
+`grpo_trainer.py`), the scaling utility, the seed-replicated eval driver
+(`scripts/eval_replicated.py`), and a CPU smoke artifact
+(`samples/distributed_smoke/`) are all in this repo and run today. The
+multi-GPU training receipt itself
+(`outputs/distributed_run/TRAINING_RECEIPT.md`) is **awaiting hardware** —
+the environment this commit was produced in does not have multi-GPU access,
+and quoting a multi-GPU receipt without running it would be dishonest.
+
+To produce the receipt, run the launcher under torchrun on a 2-GPU or 4-GPU
+host (Kaggle 2xT4, Colab Pro+, or a lab cluster), then run
+`scripts/eval_replicated.py` against the resulting checkpoint and fill in the
+template. No code changes are required.
 
 ## Repository Map
 
@@ -251,6 +366,64 @@ python main.py evaluate \
   --ttc-samples 16 \
   --fail-on-errors
 ```
+
+### Three-way agreement
+
+`python main.py eval agreement ...` runs the same set of traces through the
+math/code verifier, the learned reward model, and an open-weights LLM judge
+(default Qwen2.5-7B-Instruct), then writes Cohen's kappa with 95% bootstrap
+CIs, confusion matrices per pair, and a shortcut bucket of verifier-accepted
+traces the judge flagged as bad reasoning. Difficulty bins for GSM8K use the
+`<<step>>` count in the gold solution.
+
+```bash
+python main.py eval agreement \
+  --model ./outputs/grpo_model \
+  --benchmark gsm8k \
+  --n-problems 100 \
+  --n-samples 4 \
+  --judge-model Qwen/Qwen2.5-7B-Instruct \
+  --reward-model ./outputs/reward_model \
+  --output-dir ./outputs/agreement_run
+```
+
+A pipeline-smoke artifact (`samples/agreement_smoke/agreement_smoke.json`,
+produced by `scripts/agreement_smoke.py`) shows the format. It is **not** a
+benchmark claim — it runs against five synthetic problems with a rule-based
+fake judge so the harness works on machines with no GPU and no network.
+
+### Robustness (perturbation retention)
+
+`python main.py eval robust ...` measures how pass@1 holds up under six
+deterministic GSM8K perturbations:
+
+| Perturbation | Label | What it does |
+|---|---|---|
+| number_swap | rewrites gold | Swap one operand in the final multiplicative step; scale gold accordingly |
+| unit_change | rewrites gold | Rewrite a recognised unit (dollars↔cents, hours↔minutes, kg↔g); scale gold |
+| irrelevant_context | preserves | Prepend an unrelated sentence |
+| distractor_sentence | preserves | Insert a sentence with a plausible-looking but irrelevant number |
+| paraphrase | preserves | Rule-based clause/word rewrites (no LLM) |
+| reordering | preserves | Swap the first two sentences when there is no anaphora |
+
+For each perturbation the runner reports applicability rate, per-perturbation
+pass@1 retention with a 95% bootstrap CI on the same subset of problems
+(controlling for difficulty), and an overall robustness score equal to the
+geometric mean of per-perturbation retentions.
+
+```bash
+python main.py eval robust \
+  --model ./outputs/grpo_model \
+  --benchmark gsm8k \
+  --n-problems 200 \
+  --n-samples 4 \
+  --seed 0 \
+  --output-dir ./outputs/robustness_run
+```
+
+A pipeline-smoke artifact (`samples/robustness_smoke/`, produced by
+`scripts/robustness_smoke.py`) exercises the same path with hand-written
+predictions against six inline problems. It is **not** a benchmark claim.
 
 Run on Kaggle T4:
 

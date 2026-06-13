@@ -71,6 +71,16 @@ from .kv_cache_manager import (
     CacheStats,
 )
 
+# Scaling utilities (pure Python, always available)
+from .scaling import (
+    StepRecord,
+    ThroughputSummary,
+    build_scaling_summary,
+    measure_throughput,
+    scaling_efficiency,
+    summarize_records,
+)
+
 __all__ = [
     # Kafka
     "KafkaProducer",
@@ -89,6 +99,13 @@ __all__ = [
     "DistributedKVCache",
     "CacheEntry",
     "CacheStats",
+    # Scaling
+    "StepRecord",
+    "ThroughputSummary",
+    "build_scaling_summary",
+    "measure_throughput",
+    "scaling_efficiency",
+    "summarize_records",
     # Availability flags
     "_kafka_available",
     "_ray_available",

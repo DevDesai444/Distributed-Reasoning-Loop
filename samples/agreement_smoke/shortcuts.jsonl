@@ -1,0 +1,1 @@
+{"problem_id": "smoke_2", "problem": "A train travels 60 mph for 2 hours. Distance covered?", "response_excerpt": "The answer is 120. #### 120", "judge_rationale": "final number matches but no derivation shown.", "reason_code": "LUCKY_GUESS", "judge_confidence": 0.8, "judge_id": "single::stub-judge", "prompt_version": "MATH_RUBRIC_V1", "extra": {}}

@@ -16,6 +16,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from prompting import format_prompt
 
+from .distributed import DistributedContext, init_distributed
 from .runtime_utils import (
     configure_training_memory,
     get_runtime_dtype,
@@ -112,6 +113,8 @@ class DPOTrainerConfig:
     bf16: bool = False
     gradient_checkpointing: bool = True
     quantization_mode: str = "auto"
+    distributed_timeout_minutes: int = 0
+    ddp_find_unused_parameters: bool = False
 
 
 class DPODataset(Dataset):
@@ -202,11 +205,27 @@ class ReasoningDPOTrainer:
         self.use_kbit_training = False
         self.loaded_adapter_checkpoint = False
         self.loaded_base_model_name = None
-        
+        # Process-group context is populated lazily in setup() so unit tests
+        # can construct the trainer without touching torch.distributed.
+        self.dist_ctx: Optional[DistributedContext] = None
+
+    def _ensure_distributed(self) -> DistributedContext:
+        if self.dist_ctx is None:
+            self.dist_ctx = init_distributed(
+                timeout_minutes=self.config.distributed_timeout_minutes,
+            )
+        return self.dist_ctx
+
+    def is_main_process(self) -> bool:
+        ctx = self.dist_ctx
+        return True if ctx is None else ctx.is_main_process
+
     def setup(self):
         """Setup model, tokenizer, and trainer."""
         from transformers import AutoTokenizer
-        
+
+        self._ensure_distributed()
+
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.config.model_name,
@@ -310,6 +329,9 @@ class ReasoningDPOTrainer:
         )
         
         # DPO training config
+        ctx = self.dist_ctx
+        ddp_backend = ctx.backend if ctx and ctx.is_distributed else None
+        local_rank = ctx.local_rank if ctx and ctx.is_distributed else -1
         dpo_config_kwargs = {
             "output_dir": self.config.output_dir,
             "num_train_epochs": self.config.num_epochs,
@@ -331,6 +353,9 @@ class ReasoningDPOTrainer:
             "max_length": self.config.max_length,
             "max_prompt_length": self.config.max_prompt_length,
             "remove_unused_columns": False,
+            "ddp_find_unused_parameters": self.config.ddp_find_unused_parameters,
+            "ddp_backend": ddp_backend,
+            "local_rank": local_rank,
         }
         training_args = DPOConfig(
             **_build_supported_kwargs(

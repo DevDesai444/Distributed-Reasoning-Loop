@@ -28,6 +28,24 @@ from .data_preprocessor import (
     preprocess_jsonl,
 )
 
+from .provenance import (
+    PROVENANCE_SCHEMA_VERSION,
+    ProvenanceMetadata,
+    build_provenance,
+    dedup_hash,
+    pair_id,
+)
+
+from .quality_score import (
+    QualityComponents,
+    score_components,
+    score_trace,
+)
+
+from .stats import RunStats, BackendCounters
+
+from .checkpoint import PairCheckpointer, CheckpointState
+
 __all__ = [
     "CoTGenerator",
     "ReasoningPath",
@@ -42,4 +60,16 @@ __all__ = [
     "DataPreprocessor",
     "PreprocessConfig",
     "preprocess_jsonl",
+    "PROVENANCE_SCHEMA_VERSION",
+    "ProvenanceMetadata",
+    "build_provenance",
+    "dedup_hash",
+    "pair_id",
+    "QualityComponents",
+    "score_components",
+    "score_trace",
+    "RunStats",
+    "BackendCounters",
+    "PairCheckpointer",
+    "CheckpointState",
 ]

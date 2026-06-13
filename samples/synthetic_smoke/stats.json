@@ -1,0 +1,23 @@
+{
+  "schema_version": "1",
+  "total_problems_attempted": 5,
+  "total_generations": 10,
+  "verifier_accepts": 5,
+  "verifier_rejects": 5,
+  "verifier_accept_rate": 0.5,
+  "pair_candidates": 5,
+  "unique_pairs_after_dedup": 5,
+  "dedup_ratio": 1.0,
+  "per_backend": {
+    "smoke": {
+      "generations": 10,
+      "accepts": 5
+    }
+  },
+  "quality_score_distribution": {
+    "p50": 1.0,
+    "p90": 1.0,
+    "p99": 1.0
+  },
+  "completed_at": "2026-06-12T04:47:25+00:00"
+}

@@ -35,6 +35,9 @@ from .benchmarks import (
     run_all_benchmarks,
 )
 
+# new in three-way agreement work
+from . import agreement, judges, shortcut_detector  # noqa: F401
+
 __all__ = [
     # Test-Time Compute
     "TestTimeCompute",

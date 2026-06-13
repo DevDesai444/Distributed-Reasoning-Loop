@@ -207,6 +207,27 @@ def cmd_evaluate(args):
     evaluate_main()
 
 
+def cmd_eval(args):
+    """Eval-suite dispatcher."""
+    remaining = args.remaining
+    if not remaining:
+        print("usage: python main.py eval <subcommand> [...]\n"
+              "  subcommands:\n"
+              "    agreement   three-way verifier/RM/judge agreement run\n"
+              "    robust      perturbation-based robustness retention", file=sys.stderr)
+        sys.exit(2)
+    sub = remaining[0]
+    rest = remaining[1:]
+    if sub == "agreement":
+        from scripts.agreement_eval import main as agreement_main
+        raise SystemExit(agreement_main(rest))
+    if sub == "robust":
+        from scripts.robustness_eval import main as robust_main
+        raise SystemExit(robust_main(rest))
+    print(f"unknown eval subcommand: {sub!r}", file=sys.stderr)
+    sys.exit(2)
+
+
 def cmd_pipeline(args):
     """Run full pipeline."""
     from scripts.run_pipeline import main as pipeline_main
@@ -258,7 +279,8 @@ Examples:
     )
     
     # Only parse the first argument (subcommand)
-    parser.add_argument('command', nargs='?', choices=['generate', 'train', 'train-grpo', 'evaluate', 'pipeline', 'serve'],
+    parser.add_argument('command', nargs='?',
+                        choices=['generate', 'train', 'train-grpo', 'evaluate', 'eval', 'pipeline', 'serve'],
                         help='Command to run')
     
     # Parse only the first argument
@@ -274,6 +296,7 @@ Examples:
         'train': cmd_train,
         'train-grpo': cmd_train_grpo,
         'evaluate': cmd_evaluate,
+        'eval': cmd_eval,
         'pipeline': cmd_pipeline,
         'serve': cmd_serve,
     }
