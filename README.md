@@ -225,6 +225,50 @@ SFT on correct traces -> DPO on preference pairs -> GRPO refinement -> benchmark
 
 Recent Kaggle/T4 support includes explicit `4bit` quantized LoRA loading and CUDA memory guards so the full `best` pipeline can run without skipping SFT.
 
+#### Process reward model from shortcuts
+
+The agreement framework emits a `shortcuts.jsonl` bucket whenever the
+verifier accepts a trace but the judge rejects it. Paired with the clean
+verifier-accepted traces, that bucket is a labeled binary dataset — the
+verifier supplies the candidate pool, the judge supplies the
+discriminating label. The shortcut PRM learns to predict the judge label
+from the trace text alone.
+
+```bash
+# turn an agreement-run output directory into a train/eval split
+python main.py train shortcut-prm build-dataset \
+    --shortcuts ./outputs/agreement_run/shortcuts.jsonl \
+    --clean    ./outputs/agreement_run/correct_samples.jsonl \
+    --output-dir ./outputs/shortcut_prm_dataset
+
+# train (DistilBERT-class encoder is the default backbone)
+python main.py train shortcut-prm fit \
+    --dataset-dir ./outputs/shortcut_prm_dataset \
+    --output-dir  ./outputs/shortcut_prm_model \
+    --epochs 3 --batch-size 32 --lr 2e-5
+
+# CPU smoke (random-init tiny encoder, no Hub access required)
+python main.py train shortcut-prm fit --cpu-only \
+    --output-dir /tmp/shortcut_prm_smoke
+```
+
+Once trained, the model plugs into the agreement runner as a 4th
+evaluator:
+
+```bash
+python main.py eval agreement \
+    --model ./outputs/sft_model \
+    --benchmark gsm8k \
+    --reward-model ./outputs/reward_model \
+    --prm-model    ./outputs/shortcut_prm_model
+```
+
+The run report then adds `(verifier, prm)`, `(judge, prm)`, and
+`(reward_model, prm)` pair reports alongside the existing three. The
+trainer and eval wiring is the deliverable here; head-to-head numbers
+versus the existing ORM are deferred until a real shortcut bucket from a
+benchmark-scale agreement run is available.
+
 ### Evaluation and Test-Time Compute
 
 `src/evaluation/` implements:

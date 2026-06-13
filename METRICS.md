@@ -82,6 +82,8 @@ results.
   "n_problems": 100,
   "n_traces": 400,
   "rm_threshold": 0.5,
+  "prm_model": "<optional path to a shortcut-PRM checkpoint>",
+  "prm_threshold": 0.5,
   "artifacts": [
     "agreement_results.json",
     "report.md",
@@ -98,9 +100,11 @@ Interpretation rules:
 
 - `agreement_results.json` contains one `PairReport` per evaluator pair
   ((verifier, judge), (verifier, reward_model), (reward_model, judge) when
-  the reward model is wired). Each `PairReport` carries overall kappa with a
-  95% bootstrap CI, agreement rate, confusion-matrix counts, and per-bin
-  metrics for `low` / `mid` / `high` difficulty buckets.
+  the reward model is wired). When a shortcut PRM is supplied via
+  `--prm-model`, three additional pair reports appear: `(verifier, prm)`,
+  `(judge, prm)`, and `(reward_model, prm)`. Each `PairReport` carries
+  overall kappa with a 95% bootstrap CI, agreement rate, confusion-matrix
+  counts, and per-bin metrics for `low` / `mid` / `high` difficulty buckets.
 - `shortcuts.jsonl` lists verifier-accepted traces the judge rejected, keyed
   by reason code (`INCOMPLETE_REASONING`, `WRONG_METHOD`, `LUCKY_GUESS`,
   `MISSING_JUSTIFICATION`, `INCONSISTENT_STEPS`, `OTHER`).
