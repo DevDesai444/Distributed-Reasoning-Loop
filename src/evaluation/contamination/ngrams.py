@@ -3,9 +3,9 @@ Token n-gram extraction for contamination analysis.
 
 Why 13-grams by default: long enough that incidental overlap between unrelated
 text is vanishingly rare, short enough that fragmented quotations still trip.
-This is the standard unit used by the OpenAI / Llama / DeepSeek contamination
-audits. Punctuation is stripped but digits are kept because in math benchmarks
-the specific numbers in a problem are most of its identity.
+This is the conventional unit in large-corpus contamination audits across the
+literature. Punctuation is stripped but digits are kept because in math
+benchmarks the specific numbers in a problem are most of its identity.
 """
 
 from __future__ import annotations
