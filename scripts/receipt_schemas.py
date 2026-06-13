@@ -158,8 +158,10 @@ class AgreementReceipt:
             confusion = dict(pr.get("confusion", {}))
             per_bin = pr.get("per_bin", {}) or {}
             per_difficulty: Dict[str, Dict[str, Any]] = {}
-            for bucket in ("low", "mid", "high"):
-                row = per_bin.get(bucket, {}) or {}
+            # Preserve whatever bucket names the benchmark used (GSM8K =
+            # low/mid/high, MATH = level_1..5, HumanEval = "all").
+            for bucket, row in per_bin.items():
+                row = row or {}
                 per_difficulty[bucket] = {
                     "kappa": row.get("kappa"),
                     "agreement": row.get("agreement"),
